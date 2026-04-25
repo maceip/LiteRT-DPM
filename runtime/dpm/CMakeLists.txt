@@ -41,9 +41,12 @@ target_link_libraries(runtime_dpm_dpm
     LITERTLM_DEPS
 )
 
+add_subdirectory(config)
+
 add_library(runtime_dpm_libs INTERFACE)
 add_library(LiteRTLM::Runtime::DPM ALIAS runtime_dpm_libs)
 
 target_link_libraries(runtime_dpm_libs INTERFACE
   LiteRTLM::Runtime::DPM::DPM
+  LiteRTLM::Runtime::DPM::Config::DpmConfigLoader
 )

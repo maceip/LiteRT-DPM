@@ -1,0 +1,101 @@
+// Copyright 2026 Google LLC.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package litert.lm.proto;
+
+// Source-of-truth configuration for a Deterministic Projection Memory (DPM)
+// deployment. Loaded from proto-text by runtime/dpm/config/dpm_config_loader.
+//
+// YAML loading is intentionally out of scope. Operators that prefer a YAML
+// surface should render proto-text from their own config tooling and feed it
+// to the loader.
+
+// Identifies one DPM session. Used to namespace event logs, retention sidecars,
+// and Phase 2 checkpoint blobs at the substrate level. Both fields must be
+// non-empty and must not contain path separators.
+message DpmLogIdentity {
+  string tenant_id = 1;
+  string session_id = 2;
+}
+
+// Schema-anchored projection settings. Mirrors DPMProjector::ProjectionConfig.
+message DpmProjectionConfig {
+  // Schema identifier (e.g. "insurance_liability_v2"). Required.
+  string schema_id = 1;
+
+  // Task schema as JSON. Required and must parse.
+  string schema_json = 2;
+
+  // Memory budget B for the projection prompt, in characters.
+  uint32 memory_budget_chars = 3;
+
+  // Maximum permitted size of the rendered event log inside the projection
+  // prompt. Exceeding this returns ResourceExhausted; hierarchical projection
+  // is the planned Phase 2+ escape hatch.
+  uint32 max_event_log_chars = 4;
+
+  // Maximum number of tokens the model may emit per projection call.
+  uint32 max_tokens = 5;
+
+  // Pinned model identifier; stamped on every kModel event for replay-time
+  // backend-drift detection. Required.
+  string model_id = 6;
+
+  // Sampler seed. Required to be set by the loader; defaults to the paper's
+  // fixed seed when unspecified.
+  int32 seed = 7;
+}
+
+// Optional retention policy applied to records as they are written. The local
+// substrate persists this metadata as a sidecar; bucket-level Object Lock on
+// the underlying S3 bucket continues to enforce immutability for synced
+// objects.
+message DpmRetentionPolicy {
+  // Retention expiry as a Unix timestamp in seconds. 0 disables.
+  int64 retain_until_unix_seconds = 1;
+
+  // Whether to apply a legal hold on every record. Independent of retention
+  // expiry; legal-hold-protected records cannot be deleted regardless of
+  // retain_until.
+  bool legal_hold = 2;
+}
+
+// Substrate selection. Phase 1 ships POSIX (suitable for local disk, EFS, or
+// an S3 Files mount). Phase 2 will add additional substrates here.
+message DpmEventSinkConfig {
+  oneof backend {
+    DpmPosixEventSinkConfig posix = 1;
+  }
+}
+
+message DpmPosixEventSinkConfig {
+  // Filesystem root under which tenant_id/session_id/events.dpmlog records
+  // are written.
+  string root_path = 1;
+}
+
+// Top-level DPM configuration. Owned by the loader and consumed by
+// StatelessDecisionEngine.
+message DpmConfig {
+  DpmLogIdentity identity = 1;
+  DpmProjectionConfig projection = 2;
+  DpmEventSinkConfig event_sink = 3;
+  DpmRetentionPolicy retention = 4;
+
+  // Decider settings.
+  string decision_options = 5;
+  uint32 max_decision_tokens = 6;
+}
