@@ -28,6 +28,7 @@ cc_library(
     name = "event_sink",
     hdrs = ["event_sink.h"],
     deps = [
+        "@com_google_absl//absl/functional:function_ref",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:string_view",
@@ -40,6 +41,7 @@ cc_library(
     hdrs = ["posix_event_sink.h"],
     deps = [
         ":event_sink",
+        "@com_google_absl//absl/functional:function_ref",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -53,8 +55,10 @@ cc_test(
     name = "posix_event_sink_test",
     srcs = ["posix_event_sink_test.cc"],
     deps = [
+        ":event_sink",
         ":posix_event_sink",
         "@com_google_googletest//:gtest_main",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings:string_view",
         "//runtime/util:test_utils",
     ],

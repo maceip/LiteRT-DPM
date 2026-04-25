@@ -29,6 +29,7 @@ target_include_directories(runtime_platform_eventlog_posix_event_sink
 target_link_libraries(runtime_platform_eventlog_posix_event_sink
   PUBLIC
     runtime_util_litert_status_util
+    runtime_util_memory_mapped_file
     LITERTLM_DEPS
 )
 
