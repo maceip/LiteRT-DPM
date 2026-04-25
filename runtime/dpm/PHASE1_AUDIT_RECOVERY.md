@@ -1,7 +1,14 @@
 # Phase 1 Audit Recovery
 
-This file tracks audit findings that are intentionally part of the Phase 1
-definition of done, so omissions do not silently roll into Phase 2.
+> **Phase 1 is complete for stateless replay and paper-aligned DPM runtime
+> semantics. Remaining work is performance tuning for long-sequence prefill
+> and Phase 2 checkpointing, not Phase 1 correctness.**
+
+For the reviewer-facing closure checklist with the four-bucket scoring
+(complete / accepted substitution / deferred perf / not Phase 1 code), see
+`PHASE1_STATUS.md`. This file is the historical record of audit findings
+that fed into Phase 1 — keep it for context; the status doc is the
+authoritative pass/fail surface.
 
 ## Closed In Runtime
 
@@ -25,14 +32,40 @@ definition of done, so omissions do not silently roll into Phase 2.
   `Facts`, `Reasoning`, and `Compliance`.
 - Fresh-context inference rejects `fresh_context=false`; backends with a
   current-step probe must start new sessions at KV step 0.
+- `SessionConfig::SetForceKvResetBeforePrefill(true)` propagates from the
+  DPM runner into the serial and threaded execution managers, which call
+  `llm_executor->Reset()` before every `Tasks::Prefill`. This is the literal
+  Predict-loop KV reset the structure doc asked for; non-DPM callers leave
+  the flag false and retain KV reuse across calls.
 - `Decide()` requires request and response timestamps by default; wall-clock
   capture is an explicit opt-in, and model events record the pinned `model_id`.
+- The default determinism test exercises the real append/read/prompt-builder
+  path over 10 replays. `//runtime/dpm:dpm_determinism_e2e_test` adds an
+  opt-in pinned-model harness for environments that mount a deterministic model
+  artifact.
 
-## Still Open Before Claiming Full Paper Parity
+## Accepted Phase 1 Substitutions
 
-- AWS SDK for C++ multipart uploader on a detached background thread, gated by
-  `remote_sync.enabled`.
-- S3 Object Lock metadata plumbing, including `CreatedAt` and `RetainUntil`
-  upload metadata hints.
-- YAML config wiring for DPM projection, log identity, and remote sync.
-- XNNPack / ML Drift long-sequence parallel prefill tuning and benchmarks.
+- The original AWS SDK uploader item is superseded for raw event logs by
+  `PosixEventSink` writing to local disk, EFS, or an S3 Files mount. This keeps
+  Phase 1 runtime code SDK-free while preserving append-only durability
+  semantics. Empirically verified during the April 25, 2026 probe: bucket-
+  level Object Lock COMPLIANCE applies to S3 Files-synced objects;
+  `fdatasync` is durable; concurrent O_APPEND is atomic; Lambda mounts work.
+- S3 Object Lock is a bucket-provisioning property for the S3 Files path.
+  Per-session retention overrides are recorded by `PosixEventSink` as a
+  `events.dpmlog.retention.json` sidecar driven by `EventSink::RetentionPolicy`
+  / `DpmRetentionPolicy` proto. Bucket-level Object Lock remains the
+  load-bearing immutability mechanism for synced objects.
+- YAML is replaced for Phase 1 by `runtime/proto/dpm_config.proto`. The
+  loader at `runtime/dpm/config/dpm_config_loader.{h,cc}` adapts proto-text
+  config into the runtime structs and matches the rest of LiteRT-LM's
+  configuration story. The runtime does not take a YAML dependency.
+
+## Follow-up Workstreams
+
+- Long-sequence parallel prefill tuning and hardware baselines. The opt-in
+  benchmark entry point is
+  `//tools/benchmarks/dpm_prefill_bench`.
+- Phase 2 checkpoint substrate and any cloud SDK intake for tensor checkpoint
+  blobs.
