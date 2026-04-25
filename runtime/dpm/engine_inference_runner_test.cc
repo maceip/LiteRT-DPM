@@ -229,5 +229,25 @@ TEST(EngineDPMInferenceRunnerTest, CreatesFreshSessionWithDeterministicSampler) 
   EXPECT_EQ(engine.last_session_config.GetSamplerParams().temperature(), 0.0f);
 }
 
+TEST(EngineDPMInferenceRunnerTest, ForcesKvResetBeforePrefillOnEverySession) {
+  FakeEngine engine(0);
+  EngineDPMInferenceRunner runner(&engine, SessionConfig::CreateDefault());
+
+  ASSERT_OK_AND_ASSIGN(std::string output1,
+                       runner.Generate("prompt-1", DPMInferenceConfig{
+                                                       .model_id =
+                                                           "pinned-test-model",
+                                                   }));
+  ASSERT_OK_AND_ASSIGN(std::string output2,
+                       runner.Generate("prompt-2", DPMInferenceConfig{
+                                                       .model_id =
+                                                           "pinned-test-model",
+                                                   }));
+  EXPECT_EQ(output1, "ok");
+  EXPECT_EQ(output2, "ok");
+  EXPECT_EQ(engine.create_session_calls, 2);
+  EXPECT_TRUE(engine.last_session_config.GetForceKvResetBeforePrefill());
+}
+
 }  // namespace
 }  // namespace litert::lm

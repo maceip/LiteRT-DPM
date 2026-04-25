@@ -258,6 +258,17 @@ class SessionConfig {
     max_output_tokens_ = max_output_tokens;
   }
 
+  // When true, the executor must zero or deallocate any persisted KV-cache
+  // state before running prefill on this session. DPM relies on this to
+  // satisfy the "Stateless Replay" property; non-DPM callers can leave it
+  // false and benefit from KV reuse across calls.
+  bool GetForceKvResetBeforePrefill() const {
+    return force_kv_reset_before_prefill_;
+  }
+  void SetForceKvResetBeforePrefill(bool force_kv_reset_before_prefill) {
+    force_kv_reset_before_prefill_ = force_kv_reset_before_prefill;
+  }
+
  private:
   // Private constructor for the SessionConfig. The user should use the
   // CreateDefault() method to create a SessionConfig.
@@ -312,6 +323,11 @@ class SessionConfig {
   // tokens (input + output) stored in the KV cache over the lifetime of a
   // session.
   int max_output_tokens_ = std::numeric_limits<int>::max();
+
+  // When true, the executor zeros or deallocates the KV-cache before each
+  // Prefill on this session. Off by default so non-DPM callers retain KV
+  // reuse across calls.
+  bool force_kv_reset_before_prefill_ = false;
 };
 
 std::ostream& operator<<(std::ostream& os, const SessionConfig& config);
