@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/hash/hash.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
@@ -52,6 +53,8 @@ EventSourcedLog::EventSourcedLog(std::filesystem::path root_path,
 
 EventSourcedLog::EventSourcedLog(EventSink* sink, DPMLogIdentity identity)
     : owned_sink_(nullptr), sink_(sink), identity_(std::move(identity)) {}
+
+EventSourcedLog::~EventSourcedLog() = default;
 
 std::filesystem::path EventSourcedLog::path() const {
   if (auto* posix = dynamic_cast<PosixEventSink*>(sink_)) {
@@ -102,35 +105,64 @@ absl::Status EventSourcedLog::Append(Event event) {
                                       identity_.session_id, payload));
   cache_loaded_ = false;
   cached_record_count_ = 0;
+  cached_records_fingerprint_ = 0;
   cached_events_.clear();
+  projection_cache_loaded_ = false;
+  cached_projection_record_count_ = 0;
+  cached_projection_records_fingerprint_ = 0;
+  cached_projection_event_log_.clear();
   return absl::OkStatus();
 }
 
 absl::StatusOr<std::vector<Event>> EventSourcedLog::LoadEventsLocked() const {
-  ASSIGN_OR_RETURN(std::vector<std::string> records,
-                   sink_->ReadRecords(identity_.tenant_id,
-                                      identity_.session_id));
-  if (cache_loaded_ && cached_record_count_ == records.size()) {
+  // Fast path: ask the sink for a cheap generation token. If the cache is
+  // populated and the token matches, skip the parse entirely.
+  absl::StatusOr<EventSink::Generation> probe =
+      sink_->ProbeGeneration(identity_.tenant_id, identity_.session_id);
+  if (probe.ok() && cache_loaded_ &&
+      cached_records_fingerprint_ == probe->opaque_token &&
+      cached_record_count_ == probe->record_count) {
     return cached_events_;
   }
+  if (!probe.ok() &&
+      probe.status().code() != absl::StatusCode::kUnimplemented) {
+    return probe.status();
+  }
+
   std::vector<Event> events;
-  events.reserve(records.size());
-  for (size_t i = 0; i < records.size(); ++i) {
-    absl::StatusOr<Event> event = EventFromJsonLine(records[i]);
-    if (!event.ok()) {
-      return absl::DataLossError(
-          absl::StrCat("DPM event log record ", i,
-                       " failed to parse: ", event.status().message()));
-    }
-    if (event->tenant_id != identity_.tenant_id ||
-        event->session_id != identity_.session_id) {
-      return absl::DataLossError(
-          "DPM event log contains a cross-tenant or cross-session event.");
-    }
-    events.push_back(std::move(*event));
+  uint64_t record_count = 0;
+  uint64_t records_fingerprint = 0;
+  RETURN_IF_ERROR(sink_->ForEachRecord(
+      identity_.tenant_id, identity_.session_id,
+      [&](absl::string_view record) -> absl::Status {
+        records_fingerprint =
+            absl::HashOf(records_fingerprint, record, record_count);
+        absl::StatusOr<Event> event = EventFromJsonLine(record);
+        if (!event.ok()) {
+          return absl::DataLossError(
+              absl::StrCat("DPM event log record ", record_count,
+                           " failed to parse: ", event.status().message()));
+        }
+        if (event->tenant_id != identity_.tenant_id ||
+            event->session_id != identity_.session_id) {
+          return absl::DataLossError(
+              "DPM event log contains a cross-tenant or cross-session event.");
+        }
+        events.push_back(std::move(*event));
+        ++record_count;
+        return absl::OkStatus();
+      }));
+  if (!probe.ok() && cache_loaded_ && cached_record_count_ == record_count &&
+      cached_records_fingerprint_ == records_fingerprint) {
+    return cached_events_;
   }
   cached_events_ = events;
-  cached_record_count_ = records.size();
+  cached_record_count_ = probe.ok() ? probe->record_count : record_count;
+  // Prefer the sink's opaque_token as the cache key when available; fall back
+  // to the per-record content fingerprint so backends without a probe still
+  // get content-addressed invalidation.
+  cached_records_fingerprint_ =
+      probe.ok() ? probe->opaque_token : records_fingerprint;
   cache_loaded_ = true;
   return cached_events_;
 }
@@ -143,6 +175,68 @@ absl::StatusOr<std::vector<Event>> EventSourcedLog::GetAllEvents() const {
   RETURN_IF_ERROR(ValidateIdentity());
   std::lock_guard<std::mutex> lock(mutex_);
   return LoadEventsLocked();
+}
+
+absl::StatusOr<std::string> EventSourcedLog::GetProjectionEventLog() const {
+  if (sink_ == nullptr) {
+    return absl::FailedPreconditionError(
+        "DPM EventSourcedLog has no event sink bound.");
+  }
+  RETURN_IF_ERROR(ValidateIdentity());
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  absl::StatusOr<EventSink::Generation> probe =
+      sink_->ProbeGeneration(identity_.tenant_id, identity_.session_id);
+  if (probe.ok() && projection_cache_loaded_ &&
+      cached_projection_records_fingerprint_ == probe->opaque_token &&
+      cached_projection_record_count_ == probe->record_count) {
+    return cached_projection_event_log_;
+  }
+  if (!probe.ok() &&
+      probe.status().code() != absl::StatusCode::kUnimplemented) {
+    return probe.status();
+  }
+
+  std::string event_log;
+  uint64_t record_count = 0;
+  uint64_t records_fingerprint = 0;
+  RETURN_IF_ERROR(sink_->ForEachRecord(
+      identity_.tenant_id, identity_.session_id,
+      [&](absl::string_view record) -> absl::Status {
+        records_fingerprint =
+            absl::HashOf(records_fingerprint, record, record_count);
+        absl::StatusOr<Event> event = EventFromJsonLine(record);
+        if (!event.ok()) {
+          return absl::DataLossError(
+              absl::StrCat("DPM event log record ", record_count,
+                           " failed to parse: ", event.status().message()));
+        }
+        if (event->tenant_id != identity_.tenant_id ||
+            event->session_id != identity_.session_id) {
+          return absl::DataLossError(
+              "DPM event log contains a cross-tenant or cross-session event.");
+        }
+        if (record_count > 0) {
+          event_log.push_back('\n');
+        }
+        absl::StrAppend(&event_log, "[", record_count + 1, "] ");
+        event_log.append(record.data(), record.size());
+        ++record_count;
+        return absl::OkStatus();
+      }));
+  if (!probe.ok() && projection_cache_loaded_ &&
+      cached_projection_record_count_ == record_count &&
+      cached_projection_records_fingerprint_ == records_fingerprint) {
+    return cached_projection_event_log_;
+  }
+
+  cached_projection_event_log_ = std::move(event_log);
+  cached_projection_record_count_ =
+      probe.ok() ? probe->record_count : record_count;
+  cached_projection_records_fingerprint_ =
+      probe.ok() ? probe->opaque_token : records_fingerprint;
+  projection_cache_loaded_ = true;
+  return cached_projection_event_log_;
 }
 
 absl::StatusOr<std::vector<Event>> EventSourcedLog::GetEventsSince(

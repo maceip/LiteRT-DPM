@@ -15,9 +15,11 @@
 #ifndef THIRD_PARTY_ODML_LITERT_LM_RUNTIME_PLATFORM_EVENTLOG_EVENT_SINK_H_
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_PLATFORM_EVENTLOG_EVENT_SINK_H_
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
+#include "absl/functional/function_ref.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
@@ -40,6 +42,41 @@ class EventSink {
 
   virtual absl::StatusOr<std::vector<std::string>> ReadRecords(
       absl::string_view tenant_id, absl::string_view session_id) const = 0;
+
+  virtual absl::Status ForEachRecord(
+      absl::string_view tenant_id, absl::string_view session_id,
+      absl::FunctionRef<absl::Status(absl::string_view)> callback) const {
+    absl::StatusOr<std::vector<std::string>> records =
+        ReadRecords(tenant_id, session_id);
+    if (!records.ok()) {
+      return records.status();
+    }
+    for (const std::string& record : *records) {
+      absl::Status status = callback(record);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    return absl::OkStatus();
+  }
+
+  // Generation token that consumers can use to invalidate decoded-record
+  // caches without re-reading the underlying records. Treat the pair as an
+  // opaque cache key: implementations may populate record_count when it is
+  // cheap, or leave it at zero and advance opaque_token instead.
+  // The default implementation returns kUnimplemented; callers must treat
+  // that as "always invalidate the cache".
+  struct Generation {
+    uint64_t record_count = 0;
+    uint64_t opaque_token = 0;
+  };
+  virtual absl::StatusOr<Generation> ProbeGeneration(
+      absl::string_view tenant_id, absl::string_view session_id) const {
+    (void)tenant_id;
+    (void)session_id;
+    return absl::UnimplementedError(
+        "EventSink::ProbeGeneration is not implemented by this backend.");
+  }
 };
 
 }  // namespace litert::lm

@@ -18,8 +18,10 @@
 #include <fstream>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "absl/functional/function_ref.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
@@ -140,8 +142,71 @@ class InMemoryEventSink : public EventSink {
     return it->second;
   }
 
+  void ReplaceRecords(absl::string_view tenant_id, absl::string_view session_id,
+                      std::vector<std::string> records) {
+    records_[std::string(tenant_id) + "|" + std::string(session_id)] =
+        std::move(records);
+  }
+
  private:
   mutable std::map<std::string, std::vector<std::string>> records_;
+};
+
+class ProbeEventSink : public EventSink {
+ public:
+  absl::Status AppendRecord(absl::string_view tenant_id,
+                            absl::string_view session_id,
+                            absl::string_view record_payload) override {
+    records_[std::string(tenant_id) + "|" + std::string(session_id)]
+        .emplace_back(record_payload);
+    ++generation_.opaque_token;
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<std::vector<std::string>> ReadRecords(
+      absl::string_view tenant_id,
+      absl::string_view session_id) const override {
+    const std::string key =
+        std::string(tenant_id) + "|" + std::string(session_id);
+    auto it = records_.find(key);
+    if (it == records_.end()) {
+      return std::vector<std::string>();
+    }
+    return it->second;
+  }
+
+  absl::Status ForEachRecord(
+      absl::string_view tenant_id, absl::string_view session_id,
+      absl::FunctionRef<absl::Status(absl::string_view)> callback)
+      const override {
+    ++for_each_calls;
+    absl::StatusOr<std::vector<std::string>> records =
+        ReadRecords(tenant_id, session_id);
+    if (!records.ok()) {
+      return records.status();
+    }
+    for (const std::string& record : *records) {
+      absl::Status status = callback(record);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<EventSink::Generation> ProbeGeneration(
+      absl::string_view tenant_id,
+      absl::string_view session_id) const override {
+    (void)tenant_id;
+    (void)session_id;
+    return generation_;
+  }
+
+  mutable int for_each_calls = 0;
+
+ private:
+  mutable std::map<std::string, std::vector<std::string>> records_;
+  EventSink::Generation generation_;
 };
 
 TEST(EventSourcedLogTest, RoundTripsThroughInjectedSink) {
@@ -167,6 +232,98 @@ TEST(EventSourcedLogTest, RoundTripsThroughInjectedSink) {
   EXPECT_EQ(events[0].tenant_id, "tenant-a");
   EXPECT_EQ(events[1].type, Event::Type::kModel);
   EXPECT_EQ(events[1].timestamp_us, 200);
+}
+
+TEST(EventSourcedLogTest, ProbeGenerationReusesEventAndProjectionCaches) {
+  ProbeEventSink sink;
+  EventSourcedLog log(&sink, DPMLogIdentity{
+                                 .tenant_id = "tenant-a",
+                                 .session_id = "session-1",
+                             });
+  ASSERT_OK(log.Append(Event{
+      .type = Event::Type::kUser,
+      .payload = "first",
+      .timestamp_us = 100,
+  }));
+  ASSERT_OK(log.Append(Event{
+      .type = Event::Type::kTool,
+      .payload = "second",
+      .timestamp_us = 200,
+  }));
+
+  ASSERT_OK_AND_ASSIGN(std::vector<Event> first_events, log.GetAllEvents());
+  ASSERT_EQ(first_events.size(), 2);
+  EXPECT_EQ(sink.for_each_calls, 1);
+
+  ASSERT_OK_AND_ASSIGN(std::vector<Event> second_events, log.GetAllEvents());
+  ASSERT_EQ(second_events.size(), 2);
+  EXPECT_EQ(sink.for_each_calls, 1);
+
+  ASSERT_OK_AND_ASSIGN(std::string first_prompt_log,
+                       log.GetProjectionEventLog());
+  EXPECT_NE(first_prompt_log.find("[1] {"), std::string::npos);
+  EXPECT_EQ(sink.for_each_calls, 2);
+
+  ASSERT_OK_AND_ASSIGN(std::string second_prompt_log,
+                       log.GetProjectionEventLog());
+  EXPECT_EQ(second_prompt_log, first_prompt_log);
+  EXPECT_EQ(sink.for_each_calls, 2);
+}
+
+TEST(EventSourcedLogTest, CacheInvalidatesWhenSameRecordCountChanges) {
+  InMemoryEventSink sink;
+  EventSourcedLog log(&sink, DPMLogIdentity{
+                                 .tenant_id = "tenant-a",
+                                 .session_id = "session-1",
+                             });
+  ASSERT_OK(log.Append(Event{
+      .type = Event::Type::kUser,
+      .payload = "first",
+      .timestamp_us = 100,
+  }));
+  ASSERT_OK_AND_ASSIGN(std::vector<Event> first_read, log.GetAllEvents());
+  ASSERT_EQ(first_read.size(), 1);
+  EXPECT_EQ(first_read[0].payload, "first");
+
+  sink.ReplaceRecords("tenant-a", "session-1",
+                      {EventToJsonLine(Event{
+                          .type = Event::Type::kUser,
+                          .tenant_id = "tenant-a",
+                          .session_id = "session-1",
+                          .payload = "replacement",
+                          .timestamp_us = 200,
+                      })});
+
+  ASSERT_OK_AND_ASSIGN(std::vector<Event> second_read, log.GetAllEvents());
+  ASSERT_EQ(second_read.size(), 1);
+  EXPECT_EQ(second_read[0].payload, "replacement");
+}
+
+TEST(EventSourcedLogTest, ProjectionEventLogIsPaperIndexedAndCompact) {
+  InMemoryEventSink sink;
+  EventSourcedLog log(&sink, DPMLogIdentity{
+                                 .tenant_id = "tenant-a",
+                                 .session_id = "session-1",
+                             });
+  ASSERT_OK(log.Append(Event{
+      .type = Event::Type::kUser,
+      .payload = "first",
+      .timestamp_us = 100,
+  }));
+  ASSERT_OK(log.Append(Event{
+      .type = Event::Type::kTool,
+      .payload = "second",
+      .timestamp_us = 200,
+  }));
+
+  ASSERT_OK_AND_ASSIGN(std::string event_log, log.GetProjectionEventLog());
+
+  EXPECT_NE(event_log.find("[1] {"), std::string::npos);
+  EXPECT_NE(event_log.find("[2] {"), std::string::npos);
+  EXPECT_EQ(event_log.find("\"index\""), std::string::npos);
+  EXPECT_NE(event_log.find("\"payload\":\"first\""), std::string::npos);
+  EXPECT_EQ(event_log.find("\"payload\": \"first\""), std::string::npos);
+  EXPECT_NE(event_log.find('\n'), std::string::npos);
 }
 
 }  // namespace
