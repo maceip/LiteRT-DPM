@@ -36,9 +36,40 @@ class EventSink {
  public:
   virtual ~EventSink() = default;
 
+  // Retention metadata applied alongside an append. Implementations that do
+  // not support per-record retention may ignore the policy; substrates that
+  // do (e.g. PosixEventSink writing a sidecar JSON) persist it next to the
+  // record. Bucket-level Object Lock on the underlying S3 bucket continues
+  // to enforce immutability for synced objects regardless of this metadata.
+  struct RetentionPolicy {
+    int64_t retain_until_unix_seconds = 0;
+    bool legal_hold = false;
+    bool empty() const {
+      return retain_until_unix_seconds == 0 && !legal_hold;
+    }
+  };
+
   virtual absl::Status AppendRecord(absl::string_view tenant_id,
                                     absl::string_view session_id,
-                                    absl::string_view record_payload) = 0;
+                                    absl::string_view record_payload) {
+    return AppendRecordWithRetention(tenant_id, session_id, record_payload,
+                                     RetentionPolicy{});
+  }
+
+  // Sinks that support retention metadata override this; the default
+  // implementation falls back to the no-retention AppendRecord, so existing
+  // sinks (test fakes, in-memory backends) keep working unchanged. Sinks
+  // that do not support retention but receive a non-empty policy must return
+  // an error rather than silently dropping it.
+  virtual absl::Status AppendRecordWithRetention(
+      absl::string_view tenant_id, absl::string_view session_id,
+      absl::string_view record_payload, const RetentionPolicy& retention) {
+    if (!retention.empty()) {
+      return absl::UnimplementedError(
+          "EventSink backend does not support retention policy.");
+    }
+    return AppendRecord(tenant_id, session_id, record_payload);
+  }
 
   virtual absl::StatusOr<std::vector<std::string>> ReadRecords(
       absl::string_view tenant_id, absl::string_view session_id) const = 0;

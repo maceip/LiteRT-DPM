@@ -22,6 +22,7 @@
 #include "runtime/dpm/dpm_projector.h"
 #include "runtime/dpm/event_sourced_log.h"
 #include "runtime/dpm/stateless_decision_engine.h"
+#include "runtime/platform/eventlog/event_sink.h"
 #include "runtime/proto/dpm_config.pb.h"
 
 namespace litert::lm {
@@ -45,6 +46,8 @@ absl::StatusOr<DPMProjector::ProjectionConfig> ToProjectionConfig(
     const proto::DpmProjectionConfig& proto);
 absl::StatusOr<StatelessDecisionEngine::Config> ToStatelessDecisionEngineConfig(
     const proto::DpmConfig& proto);
+EventSink::RetentionPolicy ToRetentionPolicy(
+    const proto::DpmRetentionPolicy& proto);
 
 }  // namespace litert::lm
 

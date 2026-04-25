@@ -50,6 +50,18 @@ class PosixEventSink : public EventSink {
                             absl::string_view session_id,
                             absl::string_view record_payload) override;
 
+  absl::Status AppendRecordWithRetention(
+      absl::string_view tenant_id, absl::string_view session_id,
+      absl::string_view record_payload,
+      const RetentionPolicy& retention) override;
+
+  // Path of the retention sidecar that PosixEventSink writes when a non-empty
+  // RetentionPolicy is supplied. The sidecar is JSON of the form
+  //   {"retain_until_unix_seconds": <int>, "legal_hold": <bool>}
+  // alongside events.dpmlog. Bucket-level Object Lock applies regardless.
+  std::filesystem::path RetentionSidecarPathFor(
+      absl::string_view tenant_id, absl::string_view session_id) const;
+
   absl::StatusOr<std::vector<std::string>> ReadRecords(
       absl::string_view tenant_id,
       absl::string_view session_id) const override;

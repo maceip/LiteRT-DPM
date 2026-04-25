@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -327,6 +328,12 @@ std::filesystem::path PosixEventSink::PathFor(
          "events.dpmlog";
 }
 
+std::filesystem::path PosixEventSink::RetentionSidecarPathFor(
+    absl::string_view tenant_id, absl::string_view session_id) const {
+  return root_path_ / std::string(tenant_id) / std::string(session_id) /
+         "events.dpmlog.retention.json";
+}
+
 absl::Status PosixEventSink::AppendRecord(absl::string_view tenant_id,
                                           absl::string_view session_id,
                                           absl::string_view record_payload) {
@@ -366,6 +373,45 @@ absl::Status PosixEventSink::AppendRecord(absl::string_view tenant_id,
   }
   bytes.append(MakeRecord(record_payload));
   return file.Append(bytes);
+}
+
+absl::Status PosixEventSink::AppendRecordWithRetention(
+    absl::string_view tenant_id, absl::string_view session_id,
+    absl::string_view record_payload, const RetentionPolicy& retention) {
+  RETURN_IF_ERROR(AppendRecord(tenant_id, session_id, record_payload));
+  if (retention.empty()) {
+    return absl::OkStatus();
+  }
+  // Sidecar is overwritten on each call: the policy applies to the whole log
+  // going forward and the most recent value wins. Bucket-level Object Lock
+  // remains the load-bearing immutability mechanism for synced objects; the
+  // sidecar is advisory metadata for tooling, not the audit record itself.
+  const std::filesystem::path sidecar =
+      RetentionSidecarPathFor(tenant_id, session_id);
+  std::shared_ptr<std::mutex> sidecar_mutex =
+      PathMutexRegistry::Instance().Acquire(sidecar.string());
+  std::lock_guard<std::mutex> guard(*sidecar_mutex);
+  std::error_code error;
+  std::filesystem::create_directories(sidecar.parent_path(), error);
+  if (error) {
+    return absl::InternalError(absl::StrCat(
+        "Failed to create DPM retention sidecar directory: ", error.message()));
+  }
+  std::string body = absl::StrCat(
+      "{\"retain_until_unix_seconds\":", retention.retain_until_unix_seconds,
+      ",\"legal_hold\":", retention.legal_hold ? "true" : "false", "}\n");
+  std::ofstream out(sidecar, std::ios::out | std::ios::trunc | std::ios::binary);
+  if (!out.is_open()) {
+    return absl::InternalError(absl::StrCat(
+        "Failed to open DPM retention sidecar: ", sidecar.string()));
+  }
+  out.write(body.data(), body.size());
+  out.flush();
+  if (!out.good()) {
+    return absl::InternalError(absl::StrCat(
+        "Failed to write DPM retention sidecar: ", sidecar.string()));
+  }
+  return absl::OkStatus();
 }
 
 absl::StatusOr<std::vector<std::string>> PosixEventSink::ReadRecords(
