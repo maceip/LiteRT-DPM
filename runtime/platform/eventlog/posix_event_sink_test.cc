@@ -141,6 +141,51 @@ TEST(PosixEventSinkTest, ProbeGenerationAdvancesOnAppend) {
   EXPECT_LT(g1.opaque_token, g2.opaque_token);
 }
 
+TEST(PosixEventSinkTest, WritesRetentionSidecarWhenPolicyProvided) {
+  PosixEventSink sink(TestRoot("posix_event_sink_retention"));
+  EventSink::RetentionPolicy policy;
+  policy.retain_until_unix_seconds = 1777089600;
+  policy.legal_hold = true;
+  ASSERT_OK(sink.AppendRecordWithRetention("tenant-a", "session-1",
+                                           "first", policy));
+
+  const std::filesystem::path sidecar =
+      sink.RetentionSidecarPathFor("tenant-a", "session-1");
+  ASSERT_TRUE(std::filesystem::exists(sidecar));
+  std::ifstream in(sidecar);
+  std::string contents((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+  EXPECT_NE(contents.find("\"retain_until_unix_seconds\":1777089600"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"legal_hold\":true"), std::string::npos);
+
+  // Empty policy must not create a sidecar.
+  PosixEventSink sink_no_policy(TestRoot("posix_event_sink_no_retention"));
+  ASSERT_OK(sink_no_policy.AppendRecord("tenant-a", "session-1", "x"));
+  EXPECT_FALSE(std::filesystem::exists(
+      sink_no_policy.RetentionSidecarPathFor("tenant-a", "session-1")));
+}
+
+TEST(PosixEventSinkTest, RetentionSidecarOverwritesOnEachCall) {
+  PosixEventSink sink(TestRoot("posix_event_sink_retention_rewrite"));
+  EventSink::RetentionPolicy first;
+  first.retain_until_unix_seconds = 100;
+  ASSERT_OK(sink.AppendRecordWithRetention("tenant-a", "session-1",
+                                           "first", first));
+  EventSink::RetentionPolicy second;
+  second.retain_until_unix_seconds = 200;
+  second.legal_hold = true;
+  ASSERT_OK(sink.AppendRecordWithRetention("tenant-a", "session-1",
+                                           "second", second));
+
+  std::ifstream in(sink.RetentionSidecarPathFor("tenant-a", "session-1"));
+  std::string contents((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+  EXPECT_NE(contents.find("200"), std::string::npos);
+  EXPECT_EQ(contents.find("100"), std::string::npos);
+  EXPECT_NE(contents.find("true"), std::string::npos);
+}
+
 TEST(PosixEventSinkTest, DetectsCorruptedTrailingByte) {
   PosixEventSink sink(TestRoot("posix_event_sink_partial"));
   ASSERT_OK(sink.AppendRecord("tenant-a", "session-1", "first"));

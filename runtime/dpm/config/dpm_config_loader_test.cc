@@ -15,6 +15,7 @@
 #include "runtime/dpm/config/dpm_config_loader.h"
 
 #include "gtest/gtest.h"
+#include "runtime/platform/eventlog/event_sink.h"
 #include "runtime/proto/dpm_config.pb.h"
 #include "runtime/util/test_utils.h"
 
@@ -81,6 +82,17 @@ TEST(DpmConfigLoaderTest, ToProjectionConfigRequiresSchemaAndModel) {
   EXPECT_EQ(out.schema_id, "s");
   EXPECT_EQ(out.model_id, "m");
   EXPECT_EQ(out.memory_budget_chars, 1024);
+}
+
+TEST(DpmConfigLoaderTest, ToRetentionPolicyMapsFields) {
+  proto::DpmRetentionPolicy proto;
+  EXPECT_TRUE(ToRetentionPolicy(proto).empty());
+  proto.set_retain_until_unix_seconds(1777089600);
+  proto.set_legal_hold(true);
+  EventSink::RetentionPolicy out = ToRetentionPolicy(proto);
+  EXPECT_FALSE(out.empty());
+  EXPECT_EQ(out.retain_until_unix_seconds, 1777089600);
+  EXPECT_TRUE(out.legal_hold);
 }
 
 TEST(DpmConfigLoaderTest, ToStatelessDecisionEngineConfigRoundTrips) {

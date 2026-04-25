@@ -35,6 +35,7 @@ cc_library(
         "@com_google_absl//absl/strings:string_view",
         "@com_google_protobuf//:protobuf",
         "//runtime/dpm:dpm",
+        "//runtime/platform/eventlog:event_sink",
         "//runtime/proto:dpm_config_cc_proto",
     ],
 )
@@ -45,6 +46,7 @@ cc_test(
     deps = [
         ":dpm_config_loader",
         "@com_google_googletest//:gtest_main",
+        "//runtime/platform/eventlog:event_sink",
         "//runtime/proto:dpm_config_cc_proto",
         "//runtime/util:test_utils",
     ],
