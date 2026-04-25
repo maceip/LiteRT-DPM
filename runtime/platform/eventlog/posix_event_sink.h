@@ -19,7 +19,6 @@
 #include <string>
 #include <vector>
 
-#include "absl/functional/function_ref.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
@@ -34,10 +33,9 @@ namespace litert::lm {
 // inter-process file locking and fsync (or FlushFileBuffers on Windows).
 // Reads use mmap.
 //
-// PosixEventSink holds no per-(tenant, session) cache of its own. Appends use
-// a process-local path mutex plus an inter-process file lock; callers that
-// need a decoded-event cache should layer it above the sink (see
-// EventSourcedLog).
+// PosixEventSink is stateless: it holds no per-(tenant, session) cache or
+// mutex of its own. Callers that need a decoded-event cache should layer it
+// above the sink (see EventSourcedLog).
 //
 // The on-disk format is suitable for an S3 Files mount (NFS 4.x via
 // mount -t s3files), an EFS mount, or local disk. See
@@ -50,28 +48,7 @@ class PosixEventSink : public EventSink {
                             absl::string_view session_id,
                             absl::string_view record_payload) override;
 
-  absl::Status AppendRecordWithRetention(
-      absl::string_view tenant_id, absl::string_view session_id,
-      absl::string_view record_payload,
-      const RetentionPolicy& retention) override;
-
-  // Path of the retention sidecar that PosixEventSink writes when a non-empty
-  // RetentionPolicy is supplied. The sidecar is JSON of the form
-  //   {"retain_until_unix_seconds": <int>, "legal_hold": <bool>}
-  // alongside events.dpmlog. Bucket-level Object Lock applies regardless.
-  std::filesystem::path RetentionSidecarPathFor(
-      absl::string_view tenant_id, absl::string_view session_id) const;
-
   absl::StatusOr<std::vector<std::string>> ReadRecords(
-      absl::string_view tenant_id,
-      absl::string_view session_id) const override;
-
-  absl::Status ForEachRecord(
-      absl::string_view tenant_id, absl::string_view session_id,
-      absl::FunctionRef<absl::Status(absl::string_view)> callback)
-      const override;
-
-  absl::StatusOr<EventSink::Generation> ProbeGeneration(
       absl::string_view tenant_id,
       absl::string_view session_id) const override;
 

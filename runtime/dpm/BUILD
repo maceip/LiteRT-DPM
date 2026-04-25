@@ -43,7 +43,6 @@ cc_library(
         "stateless_decision_engine.h",
     ],
     deps = [
-        "@com_google_absl//absl/hash",
         "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -67,11 +66,8 @@ cc_test(
     deps = [
         ":dpm",
         "@com_google_googletest//:gtest_main",
-        "@com_google_absl//absl/functional:function_ref",
         "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:string_view",
-        "//runtime/platform/eventlog:event_sink",
         "//runtime/util:test_utils",
     ],
 )
@@ -106,29 +102,6 @@ cc_test(
         "//runtime/engine:engine_interface",
         "//runtime/engine:engine_settings",
         "//runtime/engine:io_types",
-        "//runtime/util:test_utils",
-    ],
-)
-
-cc_test(
-    name = "dpm_determinism_e2e_test",
-    srcs = ["dpm_determinism_e2e_test.cc"],
-    tags = [
-        "manual",
-        "requires-model-artifact",
-    ],
-    deps = [
-        ":dpm",
-        "@com_google_googletest//:gtest_main",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:string_view",
-        "//runtime/engine:engine_factory",
-        "//runtime/engine:engine_impl_selected",
-        "//runtime/engine:engine_interface",
-        "//runtime/engine:engine_settings",
-        "//runtime/executor:executor_settings_base",
-        "//runtime/util:litert_status_util",
         "//runtime/util:test_utils",
     ],
 )

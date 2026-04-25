@@ -52,24 +52,14 @@ absl::StatusOr<std::string> EngineDPMInferenceRunner::Generate(
   SessionConfig session_config = base_session_config_;
   session_config.GetMutableSamplerParams() = CreateDPMSamplerParameters(config);
   session_config.SetMaxOutputTokens(config.max_output_tokens);
-  // Phase 1 statelessness: every Prefill must start from a zeroed KV cache.
-  // The executor reads this flag and zeros buffers before prefill.
-  session_config.SetForceKvResetBeforePrefill(true);
 
   ASSIGN_OR_RETURN(std::unique_ptr<Engine::Session> session,
                    engine_->CreateSession(session_config));
-  // New sessions are the fresh-context boundary. Backends that expose a step
-  // probe get an additional guard against leaked KV state.
-  absl::StatusOr<int> initial_step = session->GetCurrentStep();
-  if (initial_step.ok()) {
-    if (*initial_step != 0) {
-      return absl::FailedPreconditionError(absl::StrCat(
-          "DPM fresh-context session started with nonzero KV step: ",
-          *initial_step));
-    }
-  } else if (initial_step.status().code() !=
-             absl::StatusCode::kUnimplemented) {
-    return initial_step.status();
+  ASSIGN_OR_RETURN(int initial_step, session->GetCurrentStep());
+  if (initial_step != 0) {
+    return absl::FailedPreconditionError(absl::StrCat(
+        "DPM fresh-context session started with nonzero KV step: ",
+        initial_step));
   }
   std::vector<InputData> inputs;
   inputs.emplace_back(InputText(std::string(prompt)));

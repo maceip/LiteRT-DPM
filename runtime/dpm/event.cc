@@ -14,9 +14,12 @@
 
 #include "runtime/dpm/event.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
@@ -26,10 +29,50 @@
 #include "nlohmann/json.hpp"  // from @nlohmann_json
 
 namespace litert::lm {
-namespace {
 
-nlohmann::ordered_json EventToJson(const Event& event) {
+absl::string_view EventTypeToString(Event::Type type) {
+  switch (type) {
+    case Event::Type::kUser:
+      return "user";
+    case Event::Type::kModel:
+      return "model";
+    case Event::Type::kTool:
+      return "tool";
+    case Event::Type::kInternal:
+      return "internal";
+    case Event::Type::kCorrection:
+      return "correction";
+  }
+  ABSL_LOG(FATAL) << "Unknown DPM event type.";
+  return "unknown";
+}
+
+absl::StatusOr<Event::Type> EventTypeFromString(absl::string_view type) {
+  if (type == "user") {
+    return Event::Type::kUser;
+  }
+  if (type == "model") {
+    return Event::Type::kModel;
+  }
+  if (type == "tool") {
+    return Event::Type::kTool;
+  }
+  if (type == "internal") {
+    return Event::Type::kInternal;
+  }
+  if (type == "correction") {
+    return Event::Type::kCorrection;
+  }
+  return absl::InvalidArgumentError(
+      absl::StrCat("Unknown DPM event type: ", type));
+}
+
+nlohmann::ordered_json EventToJson(const Event& event,
+                                   std::optional<int64_t> index) {
   nlohmann::ordered_json json = nlohmann::ordered_json::object();
+  if (index.has_value()) {
+    json["index"] = *index;
+  }
   json["type"] = std::string(EventTypeToString(event.type));
   json["tenant_id"] = event.tenant_id;
   json["session_id"] = event.session_id;
@@ -78,51 +121,13 @@ absl::StatusOr<Event> EventFromJson(const nlohmann::ordered_json& json) {
         .session_id = json["session_id"].get<std::string>(),
         .payload = json["payload"].get<std::string>(),
         .timestamp_us = json["timestamp_us"].get<int64_t>(),
-        .model_id = json.value("model_id", std::string()),
+        .model_id =
+            json.value("model_id", std::string()),
     };
   } catch (const std::exception& e) {
     return absl::InvalidArgumentError(
         absl::StrCat("Invalid DPM event JSON: ", e.what()));
   }
-}
-
-}  // namespace
-
-absl::string_view EventTypeToString(Event::Type type) {
-  switch (type) {
-    case Event::Type::kUser:
-      return "user";
-    case Event::Type::kModel:
-      return "model";
-    case Event::Type::kTool:
-      return "tool";
-    case Event::Type::kInternal:
-      return "internal";
-    case Event::Type::kCorrection:
-      return "correction";
-  }
-  ABSL_LOG(FATAL) << "Unknown DPM event type.";
-  return "unknown";
-}
-
-absl::StatusOr<Event::Type> EventTypeFromString(absl::string_view type) {
-  if (type == "user") {
-    return Event::Type::kUser;
-  }
-  if (type == "model") {
-    return Event::Type::kModel;
-  }
-  if (type == "tool") {
-    return Event::Type::kTool;
-  }
-  if (type == "internal") {
-    return Event::Type::kInternal;
-  }
-  if (type == "correction") {
-    return Event::Type::kCorrection;
-  }
-  return absl::InvalidArgumentError(
-      absl::StrCat("Unknown DPM event type: ", type));
 }
 
 absl::StatusOr<Event> EventFromJsonLine(absl::string_view line) {
@@ -136,6 +141,14 @@ absl::StatusOr<Event> EventFromJsonLine(absl::string_view line) {
 
 std::string EventToJsonLine(const Event& event) {
   return EventToJson(event).dump();
+}
+
+std::string EventsToJson(const std::vector<Event>& events) {
+  nlohmann::ordered_json json = nlohmann::ordered_json::array();
+  for (size_t i = 0; i < events.size(); ++i) {
+    json.push_back(EventToJson(events[i], static_cast<int64_t>(i)));
+  }
+  return json.dump(2);
 }
 
 }  // namespace litert::lm

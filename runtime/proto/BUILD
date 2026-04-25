@@ -46,21 +46,6 @@ tf_proto_library(
     srcs = ["sampler_params.proto"],
 )
 
-tf_proto_library(
-    name = "dpm_config",
-    srcs = ["dpm_config.proto"],
-)
-
-alias(
-    name = "dpm_config_proto",
-    actual = ":dpm_config",
-)
-
-alias(
-    name = "dpm_config_cc_proto",
-    actual = ":dpm_config_cc",
-)
-
 alias(
     name = "sampler_params_proto",
     actual = ":sampler_params",

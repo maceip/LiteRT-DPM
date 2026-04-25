@@ -174,15 +174,6 @@ absl::Status CopyKvCacheBuffers(
   return absl::OkStatus();
 }
 
-absl::Status ClearTensorBuffers(
-    absl::flat_hash_map<absl::string_view, TensorBuffer>& buffers) {
-  for (auto& [buffer_name, buffer] : buffers) {
-    (void)buffer_name;
-    LITERT_RETURN_IF_ERROR(buffer.Clear());
-  }
-  return absl::OkStatus();
-}
-
 absl::StatusOr<int> GetDynamicDimIndex(const Model& model,
                                        absl::string_view signature,
                                        absl::string_view tensor_name) {
@@ -1408,29 +1399,6 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::SetCurrentStep(int new_step) {
 
 absl::Status LlmLiteRtCompiledModelExecutorBase::Reset() {
   llm_context_->runtime_state().current_step = 0;
-  llm_context_->runtime_state().ran_decode = false;
-  llm_context_->runtime_state().rand_gen.reset();
-  RETURN_IF_ERROR(
-      llm_context_->processed_context().processed_tokens().RollBackToStep(0));
-  llm_context_->processed_context()
-      .processed_tokens()
-      .InvalidatePendingInputToken();
-
-  RETURN_IF_ERROR(ClearTensorBuffers(kv_cache_buffers_1_));
-  RETURN_IF_ERROR(ClearTensorBuffers(kv_cache_buffers_2_));
-  if (decode_kv_cache_buffers_1_.has_value()) {
-    RETURN_IF_ERROR(ClearTensorBuffers(*decode_kv_cache_buffers_1_));
-  }
-  if (decode_kv_cache_buffers_2_.has_value()) {
-    RETURN_IF_ERROR(ClearTensorBuffers(*decode_kv_cache_buffers_2_));
-  }
-
-  input_kv_cache_buffers_ = &kv_cache_buffers_1_;
-  output_kv_cache_buffers_ = &kv_cache_buffers_2_;
-  force_prepare_needed_ = false;
-  if (sampler_ != nullptr && sampler_handles_input_) {
-    RETURN_IF_ERROR(SetSamplerInputHandling(/*reset=*/true));
-  }
   return absl::OkStatus();
 }
 

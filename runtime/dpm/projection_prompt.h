@@ -17,16 +17,17 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "runtime/dpm/event.h"
 
 namespace litert::lm {
 
 absl::StatusOr<std::string> CreateProjectionPrompt(
-    absl::string_view event_log, absl::string_view schema_id,
-    absl::string_view schema_json, size_t memory_budget_chars,
-    size_t max_event_log_chars);
+    const std::vector<Event>& events, absl::string_view schema_id,
+    absl::string_view schema_json, size_t max_event_json_chars);
 
 std::string CreateDeciderPrompt(absl::string_view projected_memory,
                                 absl::string_view case_id,

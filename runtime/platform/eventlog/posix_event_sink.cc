@@ -19,11 +19,8 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -36,7 +33,6 @@
 #include <unistd.h>
 #endif
 
-#include "absl/functional/function_ref.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
@@ -50,31 +46,6 @@ namespace {
 constexpr std::array<char, 8> kLogMagic = {'D', 'P', 'M', 'L',
                                            'O', 'G', '1', '\n'};
 constexpr uint32_t kMaxRecordBytes = 64 * 1024 * 1024;
-
-// Process-local serialization for access to a given path. POSIX fcntl/F_SETLKW
-// locks are per-process: two threads in the same process can each hold the
-// "exclusive" file lock simultaneously, and same-process readers can observe a
-// write in progress. The path-keyed mutex below closes that gap. Cross-process
-// serialization still relies on the file lock taken inside LockedFile::Open.
-class PathMutexRegistry {
- public:
-  static PathMutexRegistry& Instance() {
-    static auto* registry = new PathMutexRegistry();
-    return *registry;
-  }
-  std::shared_ptr<std::mutex> Acquire(const std::string& key) {
-    std::lock_guard<std::mutex> lock(registry_mutex_);
-    auto& slot = mutexes_[key];
-    if (!slot) {
-      slot = std::make_shared<std::mutex>();
-    }
-    return slot;
-  }
-
- private:
-  std::mutex registry_mutex_;
-  std::unordered_map<std::string, std::shared_ptr<std::mutex>> mutexes_;
-};
 
 bool IsValidIdentityComponent(absl::string_view value) {
   return !value.empty() && value != "." && value != ".." &&
@@ -188,9 +159,6 @@ class LockedFile {
                      &bytes_written, nullptr)) {
         return absl::InternalError("Failed to write DPM log file.");
       }
-      if (bytes_written == 0) {
-        return absl::InternalError("Failed to make progress writing DPM log.");
-      }
       offset += bytes_written;
     }
     if (!FlushFileBuffers(handle_)) {
@@ -227,8 +195,8 @@ class LockedFile {
 
   static absl::StatusOr<LockedFile> Open(const std::filesystem::path& path,
                                          bool exclusive, bool create) {
-    const int flags = exclusive ? ((create ? O_CREAT : 0) | O_APPEND | O_RDWR)
-                                : O_RDONLY;
+    (void)create;
+    const int flags = exclusive ? (O_CREAT | O_APPEND | O_RDWR) : O_RDONLY;
     const int fd = open(path.string().c_str(), flags, 0640);
     if (fd < 0) {
       return absl::InternalError(
@@ -280,11 +248,11 @@ class LockedFile {
 
 #endif
 
-absl::Status ForEachMappedRecord(
-    MemoryMappedFile& mapped_file,
-    absl::FunctionRef<absl::Status(absl::string_view)> callback) {
+absl::StatusOr<std::vector<std::string>> ParseMappedRecords(
+    MemoryMappedFile& mapped_file) {
+  std::vector<std::string> records;
   if (mapped_file.length() == 0) {
-    return absl::OkStatus();
+    return records;
   }
   if (mapped_file.length() < kLogMagic.size()) {
     return absl::DataLossError("DPM event log has a partial header.");
@@ -311,10 +279,10 @@ absl::Status ForEachMappedRecord(
     if (mapped_file.length() - offset < record_size) {
       return absl::DataLossError("DPM event log has a partial record body.");
     }
-    RETURN_IF_ERROR(callback(absl::string_view(data + offset, record_size)));
+    records.emplace_back(data + offset, record_size);
     offset += record_size;
   }
-  return absl::OkStatus();
+  return records;
 }
 
 }  // namespace
@@ -328,21 +296,10 @@ std::filesystem::path PosixEventSink::PathFor(
          "events.dpmlog";
 }
 
-std::filesystem::path PosixEventSink::RetentionSidecarPathFor(
-    absl::string_view tenant_id, absl::string_view session_id) const {
-  return root_path_ / std::string(tenant_id) / std::string(session_id) /
-         "events.dpmlog.retention.json";
-}
-
 absl::Status PosixEventSink::AppendRecord(absl::string_view tenant_id,
                                           absl::string_view session_id,
                                           absl::string_view record_payload) {
   RETURN_IF_ERROR(ValidateIdentity(tenant_id, session_id));
-  if (record_payload.empty()) {
-    return absl::InvalidArgumentError(
-        "DPM event payload must not be empty; the on-disk format reserves "
-        "size==0 as a corruption sentinel.");
-  }
   if (record_payload.size() > kMaxRecordBytes) {
     return absl::InvalidArgumentError("DPM event payload is too large.");
   }
@@ -359,10 +316,6 @@ absl::Status PosixEventSink::AppendRecord(absl::string_view tenant_id,
     }
   }
 
-  std::shared_ptr<std::mutex> path_mutex =
-      PathMutexRegistry::Instance().Acquire(path.string());
-  std::lock_guard<std::mutex> guard(*path_mutex);
-
   ASSIGN_OR_RETURN(LockedFile file,
                    LockedFile::Open(path, /*exclusive=*/true,
                                     /*create=*/true));
@@ -375,104 +328,24 @@ absl::Status PosixEventSink::AppendRecord(absl::string_view tenant_id,
   return file.Append(bytes);
 }
 
-absl::Status PosixEventSink::AppendRecordWithRetention(
-    absl::string_view tenant_id, absl::string_view session_id,
-    absl::string_view record_payload, const RetentionPolicy& retention) {
-  RETURN_IF_ERROR(AppendRecord(tenant_id, session_id, record_payload));
-  if (retention.empty()) {
-    return absl::OkStatus();
-  }
-  // Sidecar is overwritten on each call: the policy applies to the whole log
-  // going forward and the most recent value wins. Bucket-level Object Lock
-  // remains the load-bearing immutability mechanism for synced objects; the
-  // sidecar is advisory metadata for tooling, not the audit record itself.
-  const std::filesystem::path sidecar =
-      RetentionSidecarPathFor(tenant_id, session_id);
-  std::shared_ptr<std::mutex> sidecar_mutex =
-      PathMutexRegistry::Instance().Acquire(sidecar.string());
-  std::lock_guard<std::mutex> guard(*sidecar_mutex);
-  std::error_code error;
-  std::filesystem::create_directories(sidecar.parent_path(), error);
-  if (error) {
-    return absl::InternalError(absl::StrCat(
-        "Failed to create DPM retention sidecar directory: ", error.message()));
-  }
-  std::string body = absl::StrCat(
-      "{\"retain_until_unix_seconds\":", retention.retain_until_unix_seconds,
-      ",\"legal_hold\":", retention.legal_hold ? "true" : "false", "}\n");
-  std::ofstream out(sidecar, std::ios::out | std::ios::trunc | std::ios::binary);
-  if (!out.is_open()) {
-    return absl::InternalError(absl::StrCat(
-        "Failed to open DPM retention sidecar: ", sidecar.string()));
-  }
-  out.write(body.data(), body.size());
-  out.flush();
-  if (!out.good()) {
-    return absl::InternalError(absl::StrCat(
-        "Failed to write DPM retention sidecar: ", sidecar.string()));
-  }
-  return absl::OkStatus();
-}
-
 absl::StatusOr<std::vector<std::string>> PosixEventSink::ReadRecords(
     absl::string_view tenant_id, absl::string_view session_id) const {
-  std::vector<std::string> records;
-  RETURN_IF_ERROR(ForEachRecord(
-      tenant_id, session_id,
-      [&records](absl::string_view record) -> absl::Status {
-        records.emplace_back(record);
-        return absl::OkStatus();
-      }));
-  return records;
-}
-
-absl::Status PosixEventSink::ForEachRecord(
-    absl::string_view tenant_id, absl::string_view session_id,
-    absl::FunctionRef<absl::Status(absl::string_view)> callback) const {
   RETURN_IF_ERROR(ValidateIdentity(tenant_id, session_id));
   const std::filesystem::path path = PathFor(tenant_id, session_id);
-  std::shared_ptr<std::mutex> path_mutex =
-      PathMutexRegistry::Instance().Acquire(path.string());
-  std::lock_guard<std::mutex> guard(*path_mutex);
   if (!std::filesystem::exists(path)) {
-    return absl::OkStatus();
+    return std::vector<std::string>();
   }
   ASSIGN_OR_RETURN(LockedFile file,
                    LockedFile::Open(path, /*exclusive=*/false,
                                     /*create=*/false));
   ASSIGN_OR_RETURN(uint64_t file_size, file.Size());
   if (file_size == 0) {
-    return absl::OkStatus();
+    return std::vector<std::string>();
   }
 
   ASSIGN_OR_RETURN(std::unique_ptr<MemoryMappedFile> mapped_file,
                    MemoryMappedFile::Create(path.string()));
-  return ForEachMappedRecord(*mapped_file, callback);
-}
-
-absl::StatusOr<EventSink::Generation> PosixEventSink::ProbeGeneration(
-    absl::string_view tenant_id, absl::string_view session_id) const {
-  RETURN_IF_ERROR(ValidateIdentity(tenant_id, session_id));
-  EventSink::Generation gen;
-  const std::filesystem::path path = PathFor(tenant_id, session_id);
-  std::shared_ptr<std::mutex> path_mutex =
-      PathMutexRegistry::Instance().Acquire(path.string());
-  std::lock_guard<std::mutex> guard(*path_mutex);
-  if (!std::filesystem::exists(path)) {
-    return gen;
-  }
-  ASSIGN_OR_RETURN(LockedFile file,
-                   LockedFile::Open(path, /*exclusive=*/false,
-                                    /*create=*/false));
-  ASSIGN_OR_RETURN(uint64_t file_size, file.Size());
-  // file_size doubles as the opaque token: any append strictly grows the file
-  // because every record is at least kLogMagic.size() + 8 + 1 bytes long. The
-  // file lock plus the process-local mutex prevent torn reads of file_size
-  // during a concurrent append.
-  gen.opaque_token = file_size;
-  // record_count is left at zero because computing it would require parsing;
-  // consumers should treat (record_count, opaque_token) as an opaque pair.
-  return gen;
+  return ParseMappedRecords(*mapped_file);
 }
 
 }  // namespace litert::lm

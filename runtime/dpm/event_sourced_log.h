@@ -26,11 +26,10 @@
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "runtime/dpm/event.h"
+#include "runtime/platform/eventlog/event_sink.h"
+#include "runtime/platform/eventlog/posix_event_sink.h"
 
 namespace litert::lm {
-
-class EventSink;
-class PosixEventSink;
 
 struct DPMLogIdentity {
   std::string tenant_id;
@@ -50,7 +49,6 @@ class EventSourcedLog {
   // a future S3 Files-aware sink, an in-memory test fake, or a Phase 3
   // Kinesis-backed sink). Ownership of the sink stays with the caller.
   EventSourcedLog(EventSink* sink, DPMLogIdentity identity);
-  ~EventSourcedLog();
 
   const DPMLogIdentity& identity() const { return identity_; }
 
@@ -60,7 +58,6 @@ class EventSourcedLog {
 
   absl::Status Append(Event event);
   absl::StatusOr<std::vector<Event>> GetAllEvents() const;
-  absl::StatusOr<std::string> GetProjectionEventLog() const;
   absl::StatusOr<std::vector<Event>> GetEventsSince(
       absl::string_view checkpoint) const;
 
@@ -74,19 +71,8 @@ class EventSourcedLog {
   DPMLogIdentity identity_;
   mutable std::mutex mutex_;
   mutable bool cache_loaded_ = false;
-  // For probe-backed sinks this stores EventSink::Generation::record_count;
-  // otherwise it stores the parsed record count.
   mutable uint64_t cached_record_count_ = 0;
-  // For probe-backed sinks this stores EventSink::Generation::opaque_token;
-  // otherwise it stores a content fingerprint of the records.
-  mutable uint64_t cached_records_fingerprint_ = 0;
   mutable std::vector<Event> cached_events_;
-  mutable bool projection_cache_loaded_ = false;
-  // Same cache-key convention as cached_record_count_.
-  mutable uint64_t cached_projection_record_count_ = 0;
-  // Same cache-key convention as cached_records_fingerprint_.
-  mutable uint64_t cached_projection_records_fingerprint_ = 0;
-  mutable std::string cached_projection_event_log_;
 };
 
 }  // namespace litert::lm

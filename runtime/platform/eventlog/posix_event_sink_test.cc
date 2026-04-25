@@ -17,13 +17,10 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include "absl/status/status.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "gtest/gtest.h"
-#include "runtime/platform/eventlog/event_sink.h"
 #include "runtime/util/test_utils.h"
 
 namespace litert::lm {
@@ -73,117 +70,11 @@ TEST(PosixEventSinkTest, RejectsPathTraversalIdentities) {
   EXPECT_FALSE(sink.AppendRecord("", "session-1", "x").ok());
 }
 
-TEST(PosixEventSinkTest, RejectsEmptyPayloadToProtectReaderInvariant) {
-  PosixEventSink sink(TestRoot("posix_event_sink_empty_payload"));
-  EXPECT_FALSE(sink.AppendRecord("tenant-a", "session-1", "").ok());
-  ASSERT_OK_AND_ASSIGN(std::vector<std::string> records,
-                       sink.ReadRecords("tenant-a", "session-1"));
-  EXPECT_TRUE(records.empty());
-}
-
 TEST(PosixEventSinkTest, ReturnsEmptyForUnknownSession) {
   PosixEventSink sink(TestRoot("posix_event_sink_empty"));
   ASSERT_OK_AND_ASSIGN(std::vector<std::string> records,
                        sink.ReadRecords("tenant-a", "session-1"));
   EXPECT_TRUE(records.empty());
-}
-
-TEST(PosixEventSinkTest, SerializesConcurrentSameProcessAppends) {
-  PosixEventSink sink(TestRoot("posix_event_sink_concurrent"));
-  constexpr int kPerWriter = 200;
-  auto writer = [&sink](absl::string_view tag,
-                        std::vector<absl::Status>* statuses) {
-    statuses->reserve(kPerWriter);
-    for (int i = 0; i < kPerWriter; ++i) {
-      statuses->push_back(sink.AppendRecord(
-          "tenant-a", "session-1", std::string(tag) + "-" + std::to_string(i)));
-    }
-  };
-  std::vector<absl::Status> statuses1;
-  std::vector<absl::Status> statuses2;
-  std::thread t1(writer, "AAA", &statuses1);
-  std::thread t2(writer, "BBB", &statuses2);
-  t1.join();
-  t2.join();
-  for (const absl::Status& status : statuses1) {
-    ASSERT_OK(status);
-  }
-  for (const absl::Status& status : statuses2) {
-    ASSERT_OK(status);
-  }
-
-  ASSERT_OK_AND_ASSIGN(std::vector<std::string> records,
-                       sink.ReadRecords("tenant-a", "session-1"));
-  ASSERT_EQ(records.size(), 2 * kPerWriter);
-  int aaa = 0, bbb = 0;
-  for (const std::string& r : records) {
-    if (r.rfind("AAA-", 0) == 0) {
-      ++aaa;
-    } else if (r.rfind("BBB-", 0) == 0) {
-      ++bbb;
-    }
-  }
-  EXPECT_EQ(aaa, kPerWriter);
-  EXPECT_EQ(bbb, kPerWriter);
-}
-
-TEST(PosixEventSinkTest, ProbeGenerationAdvancesOnAppend) {
-  PosixEventSink sink(TestRoot("posix_event_sink_probe"));
-  ASSERT_OK_AND_ASSIGN(EventSink::Generation g0,
-                       sink.ProbeGeneration("tenant-a", "session-1"));
-  ASSERT_OK(sink.AppendRecord("tenant-a", "session-1", "first"));
-  ASSERT_OK_AND_ASSIGN(EventSink::Generation g1,
-                       sink.ProbeGeneration("tenant-a", "session-1"));
-  ASSERT_OK(sink.AppendRecord("tenant-a", "session-1", "second"));
-  ASSERT_OK_AND_ASSIGN(EventSink::Generation g2,
-                       sink.ProbeGeneration("tenant-a", "session-1"));
-  EXPECT_LT(g0.opaque_token, g1.opaque_token);
-  EXPECT_LT(g1.opaque_token, g2.opaque_token);
-}
-
-TEST(PosixEventSinkTest, WritesRetentionSidecarWhenPolicyProvided) {
-  PosixEventSink sink(TestRoot("posix_event_sink_retention"));
-  EventSink::RetentionPolicy policy;
-  policy.retain_until_unix_seconds = 1777089600;
-  policy.legal_hold = true;
-  ASSERT_OK(sink.AppendRecordWithRetention("tenant-a", "session-1",
-                                           "first", policy));
-
-  const std::filesystem::path sidecar =
-      sink.RetentionSidecarPathFor("tenant-a", "session-1");
-  ASSERT_TRUE(std::filesystem::exists(sidecar));
-  std::ifstream in(sidecar);
-  std::string contents((std::istreambuf_iterator<char>(in)),
-                       std::istreambuf_iterator<char>());
-  EXPECT_NE(contents.find("\"retain_until_unix_seconds\":1777089600"),
-            std::string::npos);
-  EXPECT_NE(contents.find("\"legal_hold\":true"), std::string::npos);
-
-  // Empty policy must not create a sidecar.
-  PosixEventSink sink_no_policy(TestRoot("posix_event_sink_no_retention"));
-  ASSERT_OK(sink_no_policy.AppendRecord("tenant-a", "session-1", "x"));
-  EXPECT_FALSE(std::filesystem::exists(
-      sink_no_policy.RetentionSidecarPathFor("tenant-a", "session-1")));
-}
-
-TEST(PosixEventSinkTest, RetentionSidecarOverwritesOnEachCall) {
-  PosixEventSink sink(TestRoot("posix_event_sink_retention_rewrite"));
-  EventSink::RetentionPolicy first;
-  first.retain_until_unix_seconds = 100;
-  ASSERT_OK(sink.AppendRecordWithRetention("tenant-a", "session-1",
-                                           "first", first));
-  EventSink::RetentionPolicy second;
-  second.retain_until_unix_seconds = 200;
-  second.legal_hold = true;
-  ASSERT_OK(sink.AppendRecordWithRetention("tenant-a", "session-1",
-                                           "second", second));
-
-  std::ifstream in(sink.RetentionSidecarPathFor("tenant-a", "session-1"));
-  std::string contents((std::istreambuf_iterator<char>(in)),
-                       std::istreambuf_iterator<char>());
-  EXPECT_NE(contents.find("200"), std::string::npos);
-  EXPECT_EQ(contents.find("100"), std::string::npos);
-  EXPECT_NE(contents.find("true"), std::string::npos);
 }
 
 TEST(PosixEventSinkTest, DetectsCorruptedTrailingByte) {

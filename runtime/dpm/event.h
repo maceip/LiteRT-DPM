@@ -16,10 +16,13 @@
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_DPM_EVENT_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "nlohmann/json.hpp"  // from @nlohmann_json
 
 namespace litert::lm {
 
@@ -44,9 +47,13 @@ struct Event {
 absl::string_view EventTypeToString(Event::Type type);
 absl::StatusOr<Event::Type> EventTypeFromString(absl::string_view type);
 
+nlohmann::ordered_json EventToJson(
+    const Event& event, std::optional<int64_t> index = std::nullopt);
+absl::StatusOr<Event> EventFromJson(const nlohmann::ordered_json& json);
 absl::StatusOr<Event> EventFromJsonLine(absl::string_view line);
 
 std::string EventToJsonLine(const Event& event);
+std::string EventsToJson(const std::vector<Event>& events);
 
 }  // namespace litert::lm
 

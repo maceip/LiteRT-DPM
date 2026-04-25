@@ -33,7 +33,6 @@ namespace litert::lm {
 namespace {
 
 using ::testing::HasSubstr;
-using ::testing::Not;
 
 std::filesystem::path TestPath(absl::string_view name) {
   std::filesystem::path path =
@@ -73,11 +72,10 @@ TEST(DPMProjectorTest, CreatesSchemaAnchoredDeterministicProjectionPrompt) {
       .timestamp_us = 123,
   }));
   RecordingRunner runner(
-      R"json({"Facts":["customer requests approval [1]"],"Reasoning":["request is explicit [1]"],"Compliance":["source cited [1]"]})json");
+      R"json({"Facts":["customer requests approval [0]"],"Reasoning":["request is explicit [0]"],"Compliance":["source cited [0]"]})json");
   DPMProjector projector(&runner);
   DPMProjector::ProjectionConfig config;
   config.max_tokens = 64;
-  config.memory_budget_chars = 1338;
   config.schema_id = "insurance_liability_v2";
   config.schema_json =
       R"json({"Facts":["string with [i]"],"Reasoning":["string with [i]"],"Compliance":["string with [i]"]})json";
@@ -85,14 +83,11 @@ TEST(DPMProjectorTest, CreatesSchemaAnchoredDeterministicProjectionPrompt) {
 
   ASSERT_OK_AND_ASSIGN(std::string projection, projector.Project(log, config));
 
-  EXPECT_THAT(projection, HasSubstr("customer requests approval [1]"));
+  EXPECT_THAT(projection, HasSubstr("customer requests approval [0]"));
   ASSERT_EQ(runner.prompts.size(), 1);
-  EXPECT_THAT(runner.prompts[0],
-              HasSubstr("decision-ready memory view over an event log"));
+  EXPECT_THAT(runner.prompts[0], HasSubstr("Act as a memory projection engine"));
   EXPECT_THAT(runner.prompts[0], HasSubstr("insurance_liability_v2"));
-  EXPECT_THAT(runner.prompts[0], HasSubstr("[1] {"));
-  EXPECT_THAT(runner.prompts[0], HasSubstr("[MEMORY BUDGET]\n1338"));
-  EXPECT_THAT(runner.prompts[0], Not(HasSubstr("\"index\"")));
+  EXPECT_THAT(runner.prompts[0], HasSubstr("\"index\": 0"));
   EXPECT_THAT(runner.prompts[0], HasSubstr("customer requests approval"));
   ASSERT_EQ(runner.configs.size(), 1);
   EXPECT_EQ(runner.configs[0].max_output_tokens, 64);
@@ -161,7 +156,7 @@ TEST(DPMProjectorTest, RejectsMissingSchemaAndInvalidProjectionJson) {
   EXPECT_FALSE(projector.Project(log, config).ok());
 }
 
-TEST(DPMProjectorTest, RejectsProjectionWithoutOneBasedCitations) {
+TEST(DPMProjectorTest, RejectsProjectionWithoutCitations) {
   EventSourcedLog log(TestPath("dpm_projector_citation_test"),
                       DPMLogIdentity{
                           .tenant_id = "tenant-a",
@@ -173,7 +168,7 @@ TEST(DPMProjectorTest, RejectsProjectionWithoutOneBasedCitations) {
       .timestamp_us = 100,
   }));
   RecordingRunner runner(
-      R"json({"Facts":["fact A [0]"],"Reasoning":["because [1]"],"Compliance":["ok [1]"]})json");
+      R"json({"Facts":["fact A"],"Reasoning":["because [0]"],"Compliance":["ok [0]"]})json");
   DPMProjector projector(&runner);
   DPMProjector::ProjectionConfig config;
   config.schema_id = "insurance_liability_v2";
@@ -191,7 +186,7 @@ TEST(StatelessDecisionEngineTest, AppendsRequestProjectsThenAppendsDecision) {
                           .session_id = "session-1",
                       });
   RecordingRunner projection_runner(
-      R"json({"Facts":["ok [1]"],"Reasoning":["request supports decision [1]"],"Compliance":["citation present [1]"]})json");
+      R"json({"Facts":["ok [0]"],"Reasoning":["request supports decision [0]"],"Compliance":["citation present [0]"]})json");
   RecordingRunner decision_runner("Approve");
   DPMProjector projector(&projection_runner);
   StatelessDecisionEngine engine(&log, &projector, &decision_runner);
@@ -212,7 +207,7 @@ TEST(StatelessDecisionEngineTest, AppendsRequestProjectsThenAppendsDecision) {
                     config));
 
   EXPECT_THAT(response.projected_memory,
-              HasSubstr(R"json("Facts":["ok [1]"])json"));
+              HasSubstr(R"json("Facts":["ok [0]"])json"));
   EXPECT_THAT(response.decision_text, HasSubstr("Approve"));
   ASSERT_EQ(projection_runner.configs.size(), 1);
   EXPECT_TRUE(projection_runner.configs[0].fresh_context);
@@ -241,7 +236,7 @@ TEST(StatelessDecisionEngineTest, RejectsMissingReplayTimestampsByDefault) {
                           .session_id = "session-1",
                       });
   RecordingRunner projection_runner(
-      R"json({"Facts":["ok [1]"],"Reasoning":["request supports decision [1]"],"Compliance":["citation present [1]"]})json");
+      R"json({"Facts":["ok [0]"],"Reasoning":["request supports decision [0]"],"Compliance":["citation present [0]"]})json");
   RecordingRunner decision_runner("Approve");
   DPMProjector projector(&projection_runner);
   StatelessDecisionEngine engine(&log, &projector, &decision_runner);
