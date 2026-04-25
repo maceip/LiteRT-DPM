@@ -1,0 +1,351 @@
+// Copyright 2026 Google LLC.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "runtime/platform/eventlog/posix_event_sink.h"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
+#include "absl/status/status.h"  // from @com_google_absl
+#include "absl/status/statusor.h"  // from @com_google_absl
+#include "absl/strings/str_cat.h"  // from @com_google_absl
+#include "absl/strings/string_view.h"  // from @com_google_absl
+#include "runtime/util/memory_mapped_file.h"
+#include "runtime/util/status_macros.h"
+
+namespace litert::lm {
+namespace {
+
+constexpr std::array<char, 8> kLogMagic = {'D', 'P', 'M', 'L',
+                                           'O', 'G', '1', '\n'};
+constexpr uint32_t kMaxRecordBytes = 64 * 1024 * 1024;
+
+bool IsValidIdentityComponent(absl::string_view value) {
+  return !value.empty() && value != "." && value != ".." &&
+         value.find('/') == absl::string_view::npos &&
+         value.find('\\') == absl::string_view::npos;
+}
+
+uint32_t ReadLittleEndian32(const char* data) {
+  return static_cast<uint32_t>(static_cast<unsigned char>(data[0])) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(data[1])) << 8) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(data[2])) << 16) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(data[3])) << 24);
+}
+
+void AppendLittleEndian32(uint32_t value, std::string* out) {
+  out->push_back(static_cast<char>(value & 0xff));
+  out->push_back(static_cast<char>((value >> 8) & 0xff));
+  out->push_back(static_cast<char>((value >> 16) & 0xff));
+  out->push_back(static_cast<char>((value >> 24) & 0xff));
+}
+
+std::string MakeRecord(absl::string_view payload) {
+  std::string record;
+  record.reserve(sizeof(uint32_t) * 2 + payload.size());
+  const uint32_t size = static_cast<uint32_t>(payload.size());
+  AppendLittleEndian32(size, &record);
+  AppendLittleEndian32(~size, &record);
+  record.append(payload.data(), payload.size());
+  return record;
+}
+
+absl::Status ValidateIdentity(absl::string_view tenant_id,
+                              absl::string_view session_id) {
+  if (!IsValidIdentityComponent(tenant_id)) {
+    return absl::InvalidArgumentError(
+        "tenant_id must be non-empty and must not contain path separators.");
+  }
+  if (!IsValidIdentityComponent(session_id)) {
+    return absl::InvalidArgumentError(
+        "session_id must be non-empty and must not contain path separators.");
+  }
+  return absl::OkStatus();
+}
+
+#ifdef _WIN32
+
+class LockedFile {
+ public:
+  explicit LockedFile(HANDLE handle) : handle_(handle) {}
+  LockedFile(const LockedFile&) = delete;
+  LockedFile& operator=(const LockedFile&) = delete;
+  LockedFile(LockedFile&& other) noexcept
+      : handle_(other.handle_), lock_overlapped_(other.lock_overlapped_) {
+    other.handle_ = INVALID_HANDLE_VALUE;
+    other.lock_overlapped_ = {};
+  }
+  ~LockedFile() {
+    if (handle_ == INVALID_HANDLE_VALUE) {
+      return;
+    }
+    UnlockFileEx(handle_, 0, MAXDWORD, MAXDWORD, &lock_overlapped_);
+    CloseHandle(handle_);
+  }
+
+  static absl::StatusOr<LockedFile> Open(const std::filesystem::path& path,
+                                         bool exclusive, bool create) {
+    const DWORD access = exclusive ? (GENERIC_READ | GENERIC_WRITE)
+                                   : GENERIC_READ;
+    const DWORD disposition = create ? OPEN_ALWAYS : OPEN_EXISTING;
+    HANDLE handle =
+        CreateFileW(path.wstring().c_str(), access,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, disposition,
+                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+      return absl::InternalError(
+          absl::StrCat("Failed to open DPM log file: ", path.string()));
+    }
+
+    OVERLAPPED overlapped = {};
+    DWORD flags = exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0;
+    if (!LockFileEx(handle, flags, 0, MAXDWORD, MAXDWORD, &overlapped)) {
+      CloseHandle(handle);
+      return absl::InternalError(
+          absl::StrCat("Failed to lock DPM log file: ", path.string()));
+    }
+    LockedFile file(handle);
+    file.lock_overlapped_ = overlapped;
+    return file;
+  }
+
+  absl::StatusOr<uint64_t> Size() const {
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(handle_, &size)) {
+      return absl::InternalError("Failed to read DPM log file size.");
+    }
+    return static_cast<uint64_t>(size.QuadPart);
+  }
+
+  absl::Status Append(absl::string_view bytes) {
+    LARGE_INTEGER zero = {};
+    if (!SetFilePointerEx(handle_, zero, nullptr, FILE_END)) {
+      return absl::InternalError("Failed to seek DPM log file for append.");
+    }
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+      DWORD bytes_written = 0;
+      const size_t remaining = bytes.size() - offset;
+      const DWORD chunk_size =
+          static_cast<DWORD>(remaining < (1 << 20) ? remaining : (1 << 20));
+      if (!WriteFile(handle_, bytes.data() + offset, chunk_size,
+                     &bytes_written, nullptr)) {
+        return absl::InternalError("Failed to write DPM log file.");
+      }
+      offset += bytes_written;
+    }
+    if (!FlushFileBuffers(handle_)) {
+      return absl::InternalError("Failed to fsync DPM log file.");
+    }
+    return absl::OkStatus();
+  }
+
+ private:
+  HANDLE handle_ = INVALID_HANDLE_VALUE;
+  OVERLAPPED lock_overlapped_ = {};
+};
+
+#else
+
+class LockedFile {
+ public:
+  explicit LockedFile(int fd) : fd_(fd) {}
+  LockedFile(const LockedFile&) = delete;
+  LockedFile& operator=(const LockedFile&) = delete;
+  LockedFile(LockedFile&& other) noexcept : fd_(other.fd_) {
+    other.fd_ = -1;
+  }
+  ~LockedFile() {
+    if (fd_ < 0) {
+      return;
+    }
+    struct flock lock = {};
+    lock.l_type = F_UNLCK;
+    lock.l_whence = SEEK_SET;
+    fcntl(fd_, F_SETLK, &lock);
+    close(fd_);
+  }
+
+  static absl::StatusOr<LockedFile> Open(const std::filesystem::path& path,
+                                         bool exclusive, bool create) {
+    (void)create;
+    const int flags = exclusive ? (O_CREAT | O_APPEND | O_RDWR) : O_RDONLY;
+    const int fd = open(path.string().c_str(), flags, 0640);
+    if (fd < 0) {
+      return absl::InternalError(
+          absl::StrCat("Failed to open DPM log file: ", path.string()));
+    }
+
+    struct flock lock = {};
+    lock.l_type = exclusive ? F_WRLCK : F_RDLCK;
+    lock.l_whence = SEEK_SET;
+    if (fcntl(fd, F_SETLKW, &lock) != 0) {
+      close(fd);
+      return absl::InternalError(
+          absl::StrCat("Failed to lock DPM log file: ", path.string()));
+    }
+    return LockedFile(fd);
+  }
+
+  absl::StatusOr<uint64_t> Size() const {
+    struct stat stat_buffer = {};
+    if (fstat(fd_, &stat_buffer) != 0) {
+      return absl::InternalError("Failed to read DPM log file size.");
+    }
+    return static_cast<uint64_t>(stat_buffer.st_size);
+  }
+
+  absl::Status Append(absl::string_view bytes) {
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+      const ssize_t written =
+          write(fd_, bytes.data() + offset, bytes.size() - offset);
+      if (written <= 0) {
+        return absl::InternalError("Failed to write DPM log file.");
+      }
+      offset += static_cast<size_t>(written);
+    }
+#if defined(__APPLE__)
+    if (fsync(fd_) != 0) {
+#else
+    if (fdatasync(fd_) != 0) {
+#endif
+      return absl::InternalError("Failed to fsync DPM log file.");
+    }
+    return absl::OkStatus();
+  }
+
+ private:
+  int fd_ = -1;
+};
+
+#endif
+
+absl::StatusOr<std::vector<std::string>> ParseMappedRecords(
+    MemoryMappedFile& mapped_file) {
+  std::vector<std::string> records;
+  if (mapped_file.length() == 0) {
+    return records;
+  }
+  if (mapped_file.length() < kLogMagic.size()) {
+    return absl::DataLossError("DPM event log has a partial header.");
+  }
+  const char* data = static_cast<const char*>(mapped_file.data());
+  if (std::memcmp(data, kLogMagic.data(), kLogMagic.size()) != 0) {
+    return absl::DataLossError("DPM event log has an invalid magic header.");
+  }
+
+  size_t offset = kLogMagic.size();
+  while (offset < mapped_file.length()) {
+    if (mapped_file.length() - offset < sizeof(uint32_t) * 2) {
+      return absl::DataLossError(
+          "DPM event log has a partial length-prefixed record.");
+    }
+    const uint32_t record_size = ReadLittleEndian32(data + offset);
+    const uint32_t complement =
+        ReadLittleEndian32(data + offset + sizeof(uint32_t));
+    offset += sizeof(uint32_t) * 2;
+    if (record_size == 0 || record_size > kMaxRecordBytes ||
+        complement != ~record_size) {
+      return absl::DataLossError("DPM event log record length is corrupt.");
+    }
+    if (mapped_file.length() - offset < record_size) {
+      return absl::DataLossError("DPM event log has a partial record body.");
+    }
+    records.emplace_back(data + offset, record_size);
+    offset += record_size;
+  }
+  return records;
+}
+
+}  // namespace
+
+PosixEventSink::PosixEventSink(std::filesystem::path root_path)
+    : root_path_(std::move(root_path)) {}
+
+std::filesystem::path PosixEventSink::PathFor(
+    absl::string_view tenant_id, absl::string_view session_id) const {
+  return root_path_ / std::string(tenant_id) / std::string(session_id) /
+         "events.dpmlog";
+}
+
+absl::Status PosixEventSink::AppendRecord(absl::string_view tenant_id,
+                                          absl::string_view session_id,
+                                          absl::string_view record_payload) {
+  RETURN_IF_ERROR(ValidateIdentity(tenant_id, session_id));
+  if (record_payload.size() > kMaxRecordBytes) {
+    return absl::InvalidArgumentError("DPM event payload is too large.");
+  }
+
+  const std::filesystem::path path = PathFor(tenant_id, session_id);
+  const std::filesystem::path parent = path.parent_path();
+  if (!parent.empty()) {
+    std::error_code error;
+    std::filesystem::create_directories(parent, error);
+    if (error) {
+      return absl::InternalError(absl::StrCat(
+          "Failed to create DPM event log directory '", parent.string(),
+          "': ", error.message()));
+    }
+  }
+
+  ASSIGN_OR_RETURN(LockedFile file,
+                   LockedFile::Open(path, /*exclusive=*/true,
+                                    /*create=*/true));
+  ASSIGN_OR_RETURN(uint64_t file_size, file.Size());
+  std::string bytes;
+  if (file_size == 0) {
+    bytes.append(kLogMagic.data(), kLogMagic.size());
+  }
+  bytes.append(MakeRecord(record_payload));
+  return file.Append(bytes);
+}
+
+absl::StatusOr<std::vector<std::string>> PosixEventSink::ReadRecords(
+    absl::string_view tenant_id, absl::string_view session_id) const {
+  RETURN_IF_ERROR(ValidateIdentity(tenant_id, session_id));
+  const std::filesystem::path path = PathFor(tenant_id, session_id);
+  if (!std::filesystem::exists(path)) {
+    return std::vector<std::string>();
+  }
+  ASSIGN_OR_RETURN(LockedFile file,
+                   LockedFile::Open(path, /*exclusive=*/false,
+                                    /*create=*/false));
+  ASSIGN_OR_RETURN(uint64_t file_size, file.Size());
+  if (file_size == 0) {
+    return std::vector<std::string>();
+  }
+
+  ASSIGN_OR_RETURN(std::unique_ptr<MemoryMappedFile> mapped_file,
+                   MemoryMappedFile::Create(path.string()));
+  return ParseMappedRecords(*mapped_file);
+}
+
+}  // namespace litert::lm
