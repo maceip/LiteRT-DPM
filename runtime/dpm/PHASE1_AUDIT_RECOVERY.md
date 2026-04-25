@@ -13,13 +13,18 @@ definition of done, so omissions do not silently roll into Phase 2.
 - `EventSourcedLog` is now a decoded-event facade over an injectable
   `EventSink`; the legacy root-path constructor builds an owned
   `PosixEventSink` for backwards compatibility.
-- `GetAllEvents()` keeps a monotonic cache keyed by record count.
+- `GetAllEvents()` and projection prompt construction keep in-memory caches
+  keyed by `EventSink::ProbeGeneration()` when the substrate has a cheap
+  generation token; sinks without a probe fall back to an Abseil content
+  fingerprint.
+- Projection prompt construction streams paper-style `[i] event` lines from the
+  event sink instead of rebuilding a pretty JSON array from decoded events.
 - Projection prompts fail instead of truncating oversized logs.
 - Projection prompts require a non-empty schema id and JSON schema.
 - Projection outputs must parse as JSON and include `[i]` citations in
   `Facts`, `Reasoning`, and `Compliance`.
-- Fresh-context inference rejects `fresh_context=false` and asserts new
-  sessions start at KV step 0.
+- Fresh-context inference rejects `fresh_context=false`; backends with a
+  current-step probe must start new sessions at KV step 0.
 - `Decide()` requires request and response timestamps by default; wall-clock
   capture is an explicit opt-in, and model events record the pinned `model_id`.
 

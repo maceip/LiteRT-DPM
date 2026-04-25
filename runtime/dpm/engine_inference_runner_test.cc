@@ -38,8 +38,10 @@ namespace {
 
 class FakeSession : public Engine::Session {
  public:
-  explicit FakeSession(int initial_step, SessionConfig session_config)
+  explicit FakeSession(int initial_step, bool supports_current_step,
+                       SessionConfig session_config)
       : current_step_(initial_step),
+        supports_current_step_(supports_current_step),
         session_config_(std::move(session_config)) {}
 
   absl::StatusOr<Responses> GenerateContent(
@@ -97,7 +99,12 @@ class FakeSession : public Engine::Session {
 
   absl::Status WaitUntilDone() override { return absl::OkStatus(); }
 
-  absl::StatusOr<int> GetCurrentStep() const override { return current_step_; }
+  absl::StatusOr<int> GetCurrentStep() const override {
+    if (!supports_current_step_) {
+      return absl::UnimplementedError("not implemented");
+    }
+    return current_step_;
+  }
 
   const SessionConfig& GetSessionConfig() const override {
     return session_config_;
@@ -105,18 +112,22 @@ class FakeSession : public Engine::Session {
 
  private:
   int current_step_ = 0;
+  bool supports_current_step_ = true;
   SessionConfig session_config_;
 };
 
 class FakeEngine : public Engine {
  public:
-  explicit FakeEngine(int initial_step) : initial_step_(initial_step) {}
+  explicit FakeEngine(int initial_step, bool supports_current_step = true)
+      : initial_step_(initial_step),
+        supports_current_step_(supports_current_step) {}
 
   absl::StatusOr<std::unique_ptr<Session>> CreateSession(
       const SessionConfig& session_config) override {
     ++create_session_calls;
     last_session_config = session_config;
-    return std::make_unique<FakeSession>(initial_step_, session_config);
+    return std::make_unique<FakeSession>(initial_step_, supports_current_step_,
+                                         session_config);
   }
 
   absl::Status WaitUntilDone(absl::Duration timeout) override {
@@ -151,6 +162,7 @@ class FakeEngine : public Engine {
 
  private:
   int initial_step_ = 0;
+  bool supports_current_step_ = true;
 };
 
 TEST(EngineDPMInferenceRunnerTest, RejectsNonFreshContextConfig) {
@@ -178,6 +190,20 @@ TEST(EngineDPMInferenceRunnerTest, RejectsSessionWithLeakedStep) {
   EXPECT_FALSE(runner.Generate("prompt", DPMInferenceConfig{
                                              .model_id = "pinned-test-model",
                                          }).ok());
+  EXPECT_EQ(engine.create_session_calls, 1);
+}
+
+TEST(EngineDPMInferenceRunnerTest, AllowsBackendWithoutCurrentStepProbe) {
+  FakeEngine engine(0, /*supports_current_step=*/false);
+  EngineDPMInferenceRunner runner(&engine, SessionConfig::CreateDefault());
+
+  ASSERT_OK_AND_ASSIGN(std::string output,
+                       runner.Generate("prompt", DPMInferenceConfig{
+                                                     .model_id =
+                                                         "pinned-test-model",
+                                                 }));
+
+  EXPECT_EQ(output, "ok");
   EXPECT_EQ(engine.create_session_calls, 1);
 }
 
