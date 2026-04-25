@@ -47,7 +47,8 @@ class DPMProjector {
  public:
   struct ProjectionConfig {
     size_t max_tokens = 4096;
-    size_t max_event_json_chars = 1 << 20;
+    size_t memory_budget_chars = 4096;
+    size_t max_event_log_chars = 1 << 20;
     std::string schema_id;
     std::string schema_json;
     int seed = 42;

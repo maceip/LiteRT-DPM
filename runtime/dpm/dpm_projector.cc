@@ -17,7 +17,6 @@
 #include <cstddef>
 #include <exception>
 #include <string>
-#include <vector>
 
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
@@ -40,11 +39,13 @@ bool HasCitationAnchor(absl::string_view text) {
     }
     size_t j = i + 1;
     bool has_digit = false;
+    bool has_nonzero_digit = false;
     while (j < text.size() && text[j] >= '0' && text[j] <= '9') {
       has_digit = true;
+      has_nonzero_digit = has_nonzero_digit || text[j] != '0';
       ++j;
     }
-    if (has_digit && j < text.size() && text[j] == ']') {
+    if (has_digit && has_nonzero_digit && j < text.size() && text[j] == ']') {
       return true;
     }
   }
@@ -74,7 +75,7 @@ absl::Status ValidateProjectionCitations(const nlohmann::ordered_json& json) {
       if (!HasCitationAnchor(item_text)) {
         return absl::InvalidArgumentError(absl::StrCat(
             "DPM projection item in ", field,
-            " is missing an Event Index citation like [0]."));
+            " is missing a one-based Event Index citation like [1]."));
       }
     }
   }
@@ -130,18 +131,26 @@ absl::StatusOr<std::string> DPMProjector::Project(
 
 absl::StatusOr<std::string> DPMProjector::CreateProjectionPrompt(
     const EventSourcedLog& log, const ProjectionConfig& config) const {
+  if (config.schema_id.empty()) {
+    return absl::InvalidArgumentError(
+        "DPM projection requires a non-empty schema_id.");
+  }
+  if (config.schema_json.empty()) {
+    return absl::InvalidArgumentError(
+        "DPM projection requires a non-empty task schema.");
+  }
   try {
     (void)nlohmann::ordered_json::parse(config.schema_json);
   } catch (const std::exception& e) {
     return absl::InvalidArgumentError(
         absl::StrCat("DPM projection schema is not valid JSON: ", e.what()));
   }
-  ASSIGN_OR_RETURN(std::vector<Event> events, log.GetAllEvents());
+  ASSIGN_OR_RETURN(std::string event_log, log.GetProjectionEventLog());
   ASSIGN_OR_RETURN(
       std::string prompt,
-      litert::lm::CreateProjectionPrompt(events, config.schema_id,
-                                         config.schema_json,
-                                         config.max_event_json_chars));
+      litert::lm::CreateProjectionPrompt(
+          event_log, config.schema_id, config.schema_json,
+          config.memory_budget_chars, config.max_event_log_chars));
   return prompt;
 }
 

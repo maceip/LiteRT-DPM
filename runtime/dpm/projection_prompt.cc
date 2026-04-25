@@ -16,18 +16,17 @@
 
 #include <cstddef>
 #include <string>
-#include <vector>
 
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
-#include "runtime/dpm/event.h"
 
 namespace litert::lm {
 absl::StatusOr<std::string> CreateProjectionPrompt(
-    const std::vector<Event>& events, absl::string_view schema_id,
-    absl::string_view schema_json, size_t max_event_json_chars) {
+    absl::string_view event_log, absl::string_view schema_id,
+    absl::string_view schema_json, size_t memory_budget_chars,
+    size_t max_event_log_chars) {
   if (schema_id.empty()) {
     return absl::InvalidArgumentError(
         "DPM projection requires a non-empty schema_id.");
@@ -36,25 +35,35 @@ absl::StatusOr<std::string> CreateProjectionPrompt(
     return absl::InvalidArgumentError(
         "DPM projection requires a non-empty task schema.");
   }
-  const std::string event_json = EventsToJson(events);
-  if (max_event_json_chars > 0 && event_json.size() > max_event_json_chars) {
+  if (memory_budget_chars == 0) {
+    return absl::InvalidArgumentError(
+        "DPM projection requires a non-zero memory budget.");
+  }
+  if (max_event_log_chars > 0 && event_log.size() > max_event_log_chars) {
     return absl::ResourceExhaustedError(absl::StrCat(
         "DPM event log is too large for a single projection prompt (",
-        event_json.size(), " bytes > ", max_event_json_chars,
+        event_log.size(), " bytes > ", max_event_log_chars,
         "); hierarchical projection is required."));
   }
   return absl::StrCat(
-      "Act as a memory projection engine. Convert the append-only event log "
-      "into compact Projected Memory for a stateless decision model.\n\n",
-      "Rules:\n",
-      "- Preserve Facts, Reasoning, and Compliance as separate fields.\n",
-      "- Output valid JSON only.\n",
-      "- Use temperature 0 behavior: do not invent facts.\n",
-      "- Reference every fact by Event Index using the form [i].\n",
-      "- Treat correction events as superseding earlier conflicting facts.\n\n",
+      "System. You are producing a decision-ready memory view over an event "
+      "log for task T. Preserve every dollar amount, date, identifier, and "
+      "policy limit verbatim. Cite the event index for each claim. Do not "
+      "paraphrase numeric anchors. Output three sections in fixed order.\n\n",
+      "Instructions:\n",
+      "1. Facts (F): Extract specific anchors. If a required field is not "
+      "derivable from the log, emit unknown.\n",
+      "2. Reasoning (R): State the inferential steps taken so far based only "
+      "on the log.\n",
+      "3. Compliance (C): Note any regulatory provisions cited in the events.\n",
+      "Constraints: Output MUST be valid JSON with fields Facts, Reasoning, "
+      "and Compliance. Temperature 0.0. Reference every fact by its "
+      "one-based Event Index [i] in the log. Treat correction events as "
+      "superseding earlier conflicting facts.\n\n",
       "[SCHEMA ID]\n", schema_id, "\n\n",
       "[TASK SCHEMA]\n", schema_json, "\n\n",
-      "[EVENT LOG]\n", event_json, "\n");
+      "[MEMORY BUDGET]\n", memory_budget_chars, " characters\n\n",
+      "[EVENT LOG]\n", event_log, "\n");
 }
 
 std::string CreateDeciderPrompt(absl::string_view projected_memory,
