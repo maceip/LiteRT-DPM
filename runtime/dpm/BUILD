@@ -109,3 +109,26 @@ cc_test(
         "//runtime/util:test_utils",
     ],
 )
+
+cc_test(
+    name = "dpm_determinism_e2e_test",
+    srcs = ["dpm_determinism_e2e_test.cc"],
+    tags = [
+        "manual",
+        "requires-model-artifact",
+    ],
+    deps = [
+        ":dpm",
+        "@com_google_googletest//:gtest_main",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "//runtime/engine:engine_factory",
+        "//runtime/engine:engine_impl_selected",
+        "//runtime/engine:engine_interface",
+        "//runtime/engine:engine_settings",
+        "//runtime/executor:executor_settings_base",
+        "//runtime/util:litert_status_util",
+        "//runtime/util:test_utils",
+    ],
+)
