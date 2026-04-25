@@ -76,10 +76,13 @@ keeping the runtime free of a new external SDK.
 ## Bucket C — Deferred perf work (tracked, does not block Phase 1)
 
 - XNNPack / ML Drift long-sequence parallel prefill tuning + benchmark
-  harness. Tracked in `.codex-local/dpm_perf_notes.md`.
+  harness. The opt-in benchmark entry point is
+  `//tools/benchmarks/dpm_prefill_bench`, with baseline schema at
+  `tools/benchmarks/baselines/dpm_prefill_baselines.json`.
 - Pinned-real-model byte-identical determinism test as opt-in CI. Test
-  scaffold lives at `runtime/dpm/dpm_determinism_e2e_test.cc`; activation
-  requires a model artifact pinned in CI.
+  scaffold lives at `runtime/dpm/dpm_determinism_e2e_test.cc` and runs only
+  when `LITERTLM_ENABLE_E2E_DETERMINISM_TEST=1` and
+  `DPM_DETERMINISM_MODEL_PATH` points at a pinned model artifact.
 
 ## Bucket D — Not Phase 1 runtime code
 
