@@ -95,6 +95,32 @@ cc_library(
 )
 
 cc_library(
+    name = "checkpoint_cloud_layout",
+    srcs = ["checkpoint_cloud_layout.cc"],
+    hdrs = ["checkpoint_cloud_layout.h"],
+    deps = [
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "//runtime/platform/hash:hasher",
+        "//runtime/util:litert_status_util",
+    ],
+)
+
+cc_test(
+    name = "checkpoint_cloud_layout_test",
+    srcs = ["checkpoint_cloud_layout_test.cc"],
+    deps = [
+        ":checkpoint_cloud_layout",
+        "@com_google_googletest//:gtest_main",
+        "@com_google_absl//absl/status",
+        "//runtime/platform/hash:hasher",
+        "//runtime/util:test_utils",
+    ],
+)
+
+cc_library(
     name = "local_filesystem_checkpoint_store",
     srcs = ["local_filesystem_checkpoint_store.cc"],
     hdrs = ["local_filesystem_checkpoint_store.h"],
