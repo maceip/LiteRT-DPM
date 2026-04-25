@@ -2627,6 +2627,7 @@ absl::Status LlmLiteRtNpuCompiledModelExecutor::Reset() {
   ABSL_LOG(INFO) << "Custom NPU execution latency stats:\n" << latency_stats_;
   current_step_ = 0;
   RETURN_IF_ERROR(processed_tokens_.RollBackToStep(0));
+  processed_tokens_.InvalidatePendingInputToken();
   sampled_ids_.clear();
   latency_stats_ = {};
   last_verify_activations_.clear();

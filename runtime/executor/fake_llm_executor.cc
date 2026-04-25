@@ -284,6 +284,8 @@ absl::Status FakeLlmExecutor::Reset() {
   current_step_ = 0;
   prefill_tokens_total_ = 0;
   last_op_ = LastOp::kNone;
+  RETURN_IF_ERROR(processed_tokens_.RollBackToStep(0));
+  processed_tokens_.InvalidatePendingInputToken();
   return absl::OkStatus();
 }
 
