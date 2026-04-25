@@ -760,6 +760,18 @@ absl::Status ThreadedExecutionManager::AddPrefillTask(
 
     RETURN_IF_CANCELLED(cancelled, task_id, callback);
 
+    // Phase 1 statelessness: if the session was created with
+    // force_kv_reset_before_prefill, zero or deallocate the executor's KV
+    // cache before every Prefill. DPM relies on this; non-DPM callers leave
+    // the flag false and retain KV reuse across calls.
+    if (session_info->session_config.GetForceKvResetBeforePrefill()) {
+      const absl::Status reset_status = llm_executor.value()->Reset();
+      if (!reset_status.ok()) {
+        FinishTaskAndLogErrors(task_id, reset_status, std::move(callback));
+        return;
+      }
+    }
+
     auto responses =
         Tasks::Prefill(*llm_executor.value(), *executor_inputs,
                        /*wait_for_completion=*/true,

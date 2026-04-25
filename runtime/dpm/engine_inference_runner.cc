@@ -52,6 +52,9 @@ absl::StatusOr<std::string> EngineDPMInferenceRunner::Generate(
   SessionConfig session_config = base_session_config_;
   session_config.GetMutableSamplerParams() = CreateDPMSamplerParameters(config);
   session_config.SetMaxOutputTokens(config.max_output_tokens);
+  // Phase 1 statelessness: every Prefill must start from a zeroed KV cache.
+  // The executor reads this flag and zeros buffers before prefill.
+  session_config.SetForceKvResetBeforePrefill(true);
 
   ASSIGN_OR_RETURN(std::unique_ptr<Engine::Session> session,
                    engine_->CreateSession(session_config));
