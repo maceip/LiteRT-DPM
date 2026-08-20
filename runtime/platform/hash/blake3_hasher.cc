@@ -14,10 +14,10 @@
 
 // BLAKE3 single-threaded reference implementation in pure C++.
 // Spec: https://github.com/BLAKE3-team/BLAKE3-specs (commit 2020-01-09).
-// Test vectors: hash of N zero bytes for N in {0, 1, 63, 64, 65, 1023,
-// 1024, 1025, 2048, 2049, 3072, 3073, 4096, 4097, 5120, 5121, 6144, 6145,
-// 7168, 7169, 8192, 8193, 16384, 31744, 102400}. Each first 32 bytes
-// matches the reference output.
+// Test vectors: hash of N bytes using the official (i mod 251) input pattern
+// for N in {0, 1, 63, 64, 65, 1023, 1024, 1025, 2048, 2049, 3072, 3073,
+// 4096, 4097, 5120, 5121, 6144, 6145, 7168, 7169, 8192, 8193, 16384, 31744,
+// 102400}. Each first 32 bytes matches the reference output.
 
 #include "runtime/platform/hash/blake3_hasher.h"
 
@@ -187,7 +187,11 @@ std::array<uint32_t, 16> Blake3Hasher::ChunkState::Output(uint32_t flags) const 
   uint32_t f = flags;
   if (blocks_compressed == 0) f |= kFlagChunkStart;
   f |= kFlagChunkEnd;
-  return Compress(cv, block.data(), chunk_counter, block_len, f);
+  std::array<uint8_t, kBlockLen> output_block = block;
+  if (block_len < kBlockLen) {
+    std::fill(output_block.begin() + block_len, output_block.end(), 0);
+  }
+  return Compress(cv, output_block.data(), chunk_counter, block_len, f);
 }
 
 Blake3Hasher::Blake3Hasher() {

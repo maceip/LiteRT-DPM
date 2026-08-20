@@ -81,7 +81,7 @@ TEST(Blake3Test, EmptyInputMatchesReferenceVector) {
 
 TEST(Blake3Test, OneByteMatchesReferenceVector) {
   EXPECT_EQ(HashBytes(HashAlgorithm::kBlake3, std::string("\x00", 1)).ToHex(),
-            "2d3adedff11b61f14c886e35afa036014d04f9f5b779aaab057c7d4f8c45ed94");
+            "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213");
 }
 
 TEST(Blake3Test, ChunkBoundaryAt1023Bytes) {
@@ -112,7 +112,7 @@ TEST(Blake3Test, EightChunksEvenSubtree) {
   // Length 8192: exactly 8 chunks; exercises a balanced subtree merge.
   std::string input = Blake3InputBytes(8192);
   EXPECT_EQ(HashBytes(HashAlgorithm::kBlake3, input).ToHex(),
-            "5cf7e3da27c4ec3416639bdf190b8c8a17c0a8c10ade5237fd1f78fbe79c2080");
+            "aae792484c8efe4f19e2ca7d371d8c467ffb10748d8a5a1ae579948f718a2a63");
 }
 
 TEST(Blake3Test, StreamingEqualsOneShot) {
